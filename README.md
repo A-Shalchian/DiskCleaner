@@ -239,3 +239,6 @@ del "C:\Photos\backup\IMG_001.jpg"
 ---
 
 **⚠️ Important Safety Notice**: Both versions are designed to be safe and only perform read-only analysis. However, always review any generated delete commands before executing them. The tools help identify duplicates but the final decision to delete files is always yours.
+
+
+I pushed this from my phone!
