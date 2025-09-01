@@ -211,6 +211,7 @@ class DiskCleanerGUI:
         self.progress_queue = queue.Queue()
         self.scanning = False
         self.scan_thread = None
+        self.duplicate_data = {}  # Store file paths by item ID
         
         self.setup_ui()
         self.check_progress_queue()
@@ -315,9 +316,9 @@ class DiskCleanerGUI:
         action_buttons_frame = ttk.Frame(info_action_frame)
         action_buttons_frame.grid(row=0, column=1, sticky=tk.E)
         
-        self.generate_commands_btn = ttk.Button(action_buttons_frame, text="⚡ Generate Commands", 
-                                               command=self.generate_delete_commands, width=18)
-        self.generate_commands_btn.pack(side=tk.LEFT, padx=(0, 5))
+        self.refresh_btn = ttk.Button(action_buttons_frame, text="🔄 Refresh", 
+                                     command=self.refresh_duplicates, width=12)
+        self.refresh_btn.pack(side=tk.LEFT, padx=(0, 5))
         
         self.open_locations_btn = ttk.Button(action_buttons_frame, text="📂 Open Locations", 
                                             command=self.open_duplicate_locations, width=15)
@@ -329,7 +330,7 @@ class DiskCleanerGUI:
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
         
-        dup_columns = ('Group', 'Count', 'Size', 'Waste', 'Files')
+        dup_columns = ('Group', 'Count', 'Size', 'Waste', 'Files', 'Actions')
         self.duplicates_tree = ttk.Treeview(tree_frame, columns=dup_columns, show='headings', height=16)
         
         for col in dup_columns:
@@ -338,7 +339,8 @@ class DiskCleanerGUI:
         self.duplicates_tree.column('Count', width=60)
         self.duplicates_tree.column('Size', width=100)
         self.duplicates_tree.column('Waste', width=100)
-        self.duplicates_tree.column('Files', width=700)
+        self.duplicates_tree.column('Files', width=600)
+        self.duplicates_tree.column('Actions', width=120)
         
         dup_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.duplicates_tree.yview)
         self.duplicates_tree.configure(yscrollcommand=dup_scroll.set)
@@ -367,14 +369,15 @@ class DiskCleanerGUI:
         ttk.Button(button_frame, text="💾 Save Commands", command=self.save_commands).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(button_frame, text="📋 Copy to Clipboard", command=self.copy_commands).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(button_frame, text="🗑 Clear Commands", command=self.clear_commands).pack(side=tk.LEFT)
-        ttk.Button(button_frame, text="⚡ Generate for Selected", command=self.generate_delete_commands).pack(side=tk.LEFT, padx=(10, 0))
         
         self.commands_frame.columnconfigure(0, weight=1)
         self.commands_frame.rowconfigure(1, weight=1)
         
-        # Bind right-click menus
+        # Bind right-click menus and double-click for actions
         self.large_files_tree.bind("<Button-3>", self.show_large_files_menu)
         self.duplicates_tree.bind("<Button-3>", self.show_duplicates_menu)
+        self.duplicates_tree.bind("<Double-1>", self.on_duplicate_action_click)
+        self.duplicates_tree.bind("<Button-1>", self.on_duplicate_click)
         
     def start_scan(self):
         """Start the disk scan"""
@@ -487,6 +490,9 @@ class DiskCleanerGUI:
                 elif msg_type == 'complete':
                     self.scan_complete(data[0])
                     
+                elif msg_type == 'refresh_complete':
+                    self.refresh_complete(data[0])
+                    
                 elif msg_type == 'error':
                     self.scan_error(data[0])
                     
@@ -513,6 +519,14 @@ class DiskCleanerGUI:
         # Populate results
         self.populate_large_files(results['largest_files'])
         self.populate_duplicates(results['duplicates'])
+        
+    def refresh_complete(self, duplicates):
+        """Handle refresh completion"""
+        self.progress_bar.stop()
+        self.progress_var.set("Refresh complete!")
+        
+        # Update duplicates display
+        self.populate_duplicates(duplicates)
         
     def scan_error(self, error_msg):
         """Handle scan error"""
@@ -559,48 +573,38 @@ class DiskCleanerGUI:
         # Add to tree
         for i, (waste, file_size, filepaths) in enumerate(duplicate_groups[:50], 1):
             files_str = " | ".join(filepaths)
-            self.duplicates_tree.insert('', tk.END, values=(
+            item_id = self.duplicates_tree.insert('', tk.END, values=(
                 f"#{i}",
                 len(filepaths),
                 self.analyzer.format_size(file_size),
                 self.analyzer.format_size(waste),
-                files_str
+                files_str,
+                "🗑️ Delete | 📂 Open"
             ))
+            # Store the file paths in our data dictionary
+            self.duplicate_data[item_id] = filepaths
             
-    def generate_delete_commands(self):
-        """Generate delete commands for selected duplicates"""
-        selection = self.duplicates_tree.selection()
-        if not selection:
-            messagebox.showwarning("No Selection", "Please select duplicate groups to generate commands for")
+    def refresh_duplicates(self):
+        """Refresh the duplicates list by re-analyzing current data"""
+        if not hasattr(self.analyzer, 'file_hashes') or not self.analyzer.file_hashes:
+            messagebox.showinfo("No Data", "Please run a scan first to find duplicates")
             return
-            
-        commands = []
-        commands.append("@echo off")
-        commands.append("REM Generated delete commands for duplicate files")
-        commands.append("REM Review carefully before executing!")
-        commands.append("REM Keep the first file in each group, delete the rest")
-        commands.append("")
         
-        for item in selection:
-            values = self.duplicates_tree.item(item)['values']
-            files_str = values[4]  # File paths
-            filepaths = files_str.split(" | ")
-            
-            if len(filepaths) > 1:
-                commands.append(f"REM Group {values[0]} - {values[1]} files, {values[2]} each, saves {values[3]}")
-                commands.append(f"REM Keep: {filepaths[0]}")
-                
-                for filepath in filepaths[1:]:
-                    commands.append(f'del "{filepath}"')
-                    
-                commands.append("")
-                
-        command_text = "\n".join(commands)
-        self.commands_text.delete(1.0, tk.END)
-        self.commands_text.insert(1.0, command_text)
+        # Show progress
+        self.progress_var.set("Refreshing duplicates...")
+        self.progress_bar.start()
         
-        # Switch to commands tab
-        self.notebook.select(self.commands_frame)
+        # Re-verify duplicates in a separate thread to avoid blocking UI
+        def refresh_worker():
+            try:
+                duplicates = self.analyzer.verify_duplicates_with_full_hash(self.progress_queue)
+                self.progress_queue.put(('refresh_complete', duplicates))
+            except Exception as e:
+                self.progress_queue.put(('error', f'Refresh error: {str(e)}'))
+        
+        refresh_thread = threading.Thread(target=refresh_worker)
+        refresh_thread.daemon = True
+        refresh_thread.start()
         
     def show_large_files_menu(self, event):
         """Show context menu for large files"""
@@ -612,8 +616,8 @@ class DiskCleanerGUI:
     def show_duplicates_menu(self, event):
         """Show context menu for duplicates"""
         menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="Generate Delete Commands", command=self.generate_delete_commands)
-        menu.add_command(label="Open File Locations", command=self.open_duplicate_locations)
+        menu.add_command(label="🗑️ Delete Duplicates", command=self.delete_selected_duplicates)
+        menu.add_command(label="📂 Open File Locations", command=self.open_duplicate_locations)
         menu.tk_popup(event.x_root, event.y_root)
         
     def open_file_location(self):
@@ -682,12 +686,109 @@ class DiskCleanerGUI:
         """Clear the commands text"""
         self.commands_text.delete(1.0, tk.END)
         
+    def on_duplicate_click(self, event):
+        """Handle clicks on duplicate tree items"""
+        item = self.duplicates_tree.identify('item', event.x, event.y)
+        column = self.duplicates_tree.identify('column', event.x, event.y)
+        
+        if item and column == '#6':  # Actions column
+            # Determine which action based on x position within the column
+            bbox = self.duplicates_tree.bbox(item, column)
+            if bbox:
+                relative_x = event.x - bbox[0]
+                if relative_x < bbox[2] // 2:  # Left half - Delete
+                    self.delete_duplicate_group(item)
+                else:  # Right half - Open
+                    self.open_duplicate_group_locations(item)
+    
+    def on_duplicate_action_click(self, event):
+        """Handle double-click on duplicate items"""
+        item = self.duplicates_tree.selection()[0] if self.duplicates_tree.selection() else None
+        if item:
+            self.open_duplicate_group_locations(item)
+    
+    def delete_duplicate_group(self, item):
+        """Delete duplicates for a specific group"""
+        try:
+            filepaths = self.duplicate_data.get(item, [])
+            if not filepaths or len(filepaths) <= 1:
+                return
+            
+            # Show confirmation dialog
+            files_to_delete = filepaths[1:]  # Keep first file, delete rest
+            message = f"Delete {len(files_to_delete)} duplicate files?\n\nKeep: {filepaths[0]}\n\nDelete:\n"
+            message += "\n".join(f"• {fp}" for fp in files_to_delete[:5])
+            if len(files_to_delete) > 5:
+                message += f"\n... and {len(files_to_delete) - 5} more"
+            
+            result = messagebox.askyesno("Confirm Delete Duplicates", message)
+            if result:
+                deleted_count = 0
+                errors = []
+                
+                for filepath in files_to_delete:
+                    try:
+                        os.remove(filepath)
+                        deleted_count += 1
+                    except Exception as e:
+                        errors.append(f"{filepath}: {str(e)}")
+                
+                # Show results
+                if deleted_count > 0:
+                    self.duplicates_tree.delete(item)
+                    # Remove from our data dictionary
+                    if item in self.duplicate_data:
+                        del self.duplicate_data[item]
+                    message = f"Successfully deleted {deleted_count} duplicate files"
+                    if errors:
+                        message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:3])
+                        if len(errors) > 3:
+                            message += f"\n... and {len(errors) - 3} more errors"
+                    messagebox.showinfo("Delete Complete", message)
+                else:
+                    messagebox.showerror("Delete Failed", "No files were deleted.\n\n" + "\n".join(errors[:5]))
+                    
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not delete duplicates: {e}")
+    
+    def open_duplicate_group_locations(self, item):
+        """Open file locations for a specific duplicate group"""
+        try:
+            filepaths = self.duplicate_data.get(item, [])
+            if not filepaths:
+                return
+            
+            # Open up to 3 locations to avoid overwhelming the user
+            for filepath in filepaths[:3]:
+                try:
+                    subprocess.run(['explorer', '/select,', filepath], check=False)
+                except Exception:
+                    pass
+                    
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open file locations: {e}")
+    
+    def delete_selected_duplicates(self):
+        """Delete duplicates for selected items"""
+        selection = self.duplicates_tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select duplicate groups to delete")
+            return
+        
+        for item in selection:
+            self.delete_duplicate_group(item)
+        
+        # Refresh the duplicates list after deletion
+        if selection:
+            self.refresh_duplicates()
+    
     def clear_results(self):
         """Clear all results"""
         for item in self.large_files_tree.get_children():
             self.large_files_tree.delete(item)
         for item in self.duplicates_tree.get_children():
             self.duplicates_tree.delete(item)
+        self.duplicate_data.clear()  # Clear stored file paths
         self.duplicates_info.config(text="No duplicates found yet")
         self.commands_text.delete(1.0, tk.END)
 
