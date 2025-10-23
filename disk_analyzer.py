@@ -5,6 +5,7 @@ Scans drives to find largest files and potential duplicates
 """
 
 import os
+from version_manager import __version__
 import hashlib
 import argparse
 from collections import defaultdict
@@ -194,12 +195,16 @@ def progress_callback(files_scanned: int, current_file: str):
         print(f"Scanned {files_scanned:,} files... Currently processing: {current_file[:80]}...")
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze disk usage and find duplicates")
+    parser = argparse.ArgumentParser(
+        description="Analyze disk usage and find duplicates",
+        epilog=f"Disk Cleaner v{__version__}"
+    )
+    parser.add_argument("--version", action="version", version=f"Disk Cleaner {__version__}")
     parser.add_argument("--drives", nargs="+", help="Specific drives to scan (e.g., C: D:)")
     parser.add_argument("--min-size", type=int, default=1, help="Minimum file size in MB to consider (default: 1)")
     parser.add_argument("--top-files", type=int, default=50, help="Number of largest files to show (default: 50)")
     parser.add_argument("--no-duplicates", action="store_true", help="Skip duplicate detection")
-    
+
     args = parser.parse_args()
     
     analyzer = DiskAnalyzer(min_size_mb=args.min_size)

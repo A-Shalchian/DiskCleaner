@@ -5,6 +5,7 @@ Using the same proven functionality as the original disk_analyzer.py
 """
 
 import os
+from version_manager import __version__
 import hashlib
 import threading
 import time
@@ -221,15 +222,15 @@ class DiskCleanerGUI:
         # Main frame
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
+
         # Configure grid weights
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
         main_frame.rowconfigure(5, weight=1)
-        
-        # Title
-        title_label = ttk.Label(main_frame, text="🚀 Fast Disk Cleaner", font=('Arial', 16, 'bold'))
+
+        # Title with version
+        title_label = ttk.Label(main_frame, text=f"Disk Cleaner v{__version__}", font=('Arial', 16, 'bold'))
         title_label.grid(row=0, column=0, columnspan=3, pady=(0, 20))
         
         # Settings frame
