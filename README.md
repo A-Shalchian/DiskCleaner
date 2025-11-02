@@ -2,6 +2,12 @@
 
 A disk space analyzer that helps you find large files and duplicates on your system. I built this because I was tired of running out of space and not knowing where it all went.
 
+## Screenshot
+
+![Disk Cleaner - Electron.js Version](Disk_Cleaner.png)
+
+*Electron.js version with a modern UI*
+
 ## What's in here
 
 - `disk_analyzer.py` - Command line version with parallel scanning
