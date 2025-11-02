@@ -28,3 +28,6 @@ Thumbs.db
 # Project specific
 *.exe
 *.ico.bak
+
+# node_modules
+/node_modules
