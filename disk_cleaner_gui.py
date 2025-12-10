@@ -287,6 +287,7 @@ class DiskCleanerGUI:
         self.duplicate_data = {}  # Store file paths by item ID
         self.selected_large_files = set()  # Track selected large files
         self.selected_duplicates = set()  # Track selected duplicate groups
+        self.last_scanned_path = None  # Track what was last scanned for cache invalidation
 
         self.setup_ui()
         self.check_progress_queue()
@@ -312,19 +313,23 @@ class DiskCleanerGUI:
         settings_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
         settings_frame.columnconfigure(1, weight=1)
         
-        # Drive selection
-        ttk.Label(settings_frame, text="Drives to scan:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
+        # Drive/Directory selection
+        ttk.Label(settings_frame, text="Scan location:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
         self.drives_var = tk.StringVar()
-        drives_combo = ttk.Combobox(settings_frame, textvariable=self.drives_var, width=30)
-        drives_combo['values'] = ['All Drives'] + self.analyzer.get_available_drives()
-        drives_combo.set('All Drives')
-        drives_combo.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
+        self.drives_combo = ttk.Combobox(settings_frame, textvariable=self.drives_var, width=40)
+        self.update_drives_list()
+        self.drives_combo.set('All Drives')
+        self.drives_combo.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 10))
+
+        # Browse button for custom directory
+        self.browse_button = ttk.Button(settings_frame, text="📁 Browse...", command=self.browse_directory, width=12)
+        self.browse_button.grid(row=0, column=2, padx=(0, 10))
         
         # Min size
-        ttk.Label(settings_frame, text="Min file size (MB):").grid(row=0, column=2, sticky=tk.W, padx=(10, 5))
+        ttk.Label(settings_frame, text="Min file size (MB):").grid(row=0, column=3, sticky=tk.W, padx=(10, 5))
         self.min_size_var = tk.StringVar(value="1")
         min_size_entry = ttk.Entry(settings_frame, textvariable=self.min_size_var, width=10)
-        min_size_entry.grid(row=0, column=3, sticky=tk.W)
+        min_size_entry.grid(row=0, column=4, sticky=tk.W)
         
         # Control buttons
         control_frame = ttk.Frame(main_frame)
@@ -337,7 +342,10 @@ class DiskCleanerGUI:
         self.stop_button.pack(side=tk.LEFT, padx=(0, 10))
         
         self.clear_button = ttk.Button(control_frame, text="🗑 Clear Results", command=self.clear_results)
-        self.clear_button.pack(side=tk.LEFT)
+        self.clear_button.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.clear_cache_button = ttk.Button(control_frame, text="🔄 Clear Cache", command=self.clear_all_cache)
+        self.clear_cache_button.pack(side=tk.LEFT)
         
         # Progress (separate row to avoid overlap)
         self.progress_var = tk.StringVar(value="Ready to scan")
@@ -454,7 +462,46 @@ class DiskCleanerGUI:
 
         # Bind right-click menu for large files
         self.large_files_tree.bind("<Button-3>", self.show_large_files_menu)
-        
+
+    def update_drives_list(self):
+        """Update the drives/directories combo box"""
+        drives = self.analyzer.get_available_drives()
+        self.drives_combo['values'] = ['All Drives'] + drives + ['── Custom Directories ──']
+
+    def invalidate_cache(self):
+        """Invalidate cache after files are deleted"""
+        if self.last_scanned_path:
+            self.analyzer.clear_cache(self.last_scanned_path)
+
+    def clear_all_cache(self):
+        """Clear all cached scan results"""
+        self.analyzer.clear_cache()  # Clears all cache when no drive specified
+        self.progress_var.set("Cache cleared - next scan will be fresh")
+
+    def browse_directory(self):
+        """Open directory browser and add selected directory to scan options"""
+        directory = filedialog.askdirectory(title="Select Directory to Scan")
+        if directory:
+            # Normalize the path
+            directory = os.path.normpath(directory)
+
+            # Get current values and add the new directory if not already present
+            current_values = list(self.drives_combo['values'])
+
+            # Find or create the custom directories section
+            separator_text = '── Custom Directories ──'
+            if separator_text not in current_values:
+                current_values.append(separator_text)
+
+            # Add the directory after the separator if not already there
+            if directory not in current_values:
+                separator_idx = current_values.index(separator_text)
+                current_values.insert(separator_idx + 1, directory)
+                self.drives_combo['values'] = current_values
+
+            # Select the newly added directory
+            self.drives_var.set(directory)
+
     def start_scan(self):
         """Start the disk scan"""
         if self.scanning:
@@ -469,11 +516,15 @@ class DiskCleanerGUI:
         # Reset analyzer
         self.analyzer = DiskAnalyzer(min_size_mb=min_size)
 
-        # Determine drives to scan
+        # Determine drives/directories to scan
         drives_selection = self.drives_var.get()
         if drives_selection == 'All Drives':
             drives_to_scan = self.analyzer.get_available_drives()
+        elif drives_selection == '── Custom Directories ──':
+            messagebox.showwarning("Invalid Selection", "Please select a specific drive or use 'Browse...' to select a directory")
+            return
         else:
+            # Could be a drive or a custom directory path
             drives_to_scan = [drives_selection]
 
         # Clear previous results
@@ -485,6 +536,9 @@ class DiskCleanerGUI:
         self.stop_button.config(state=tk.NORMAL)
         self.progress_bar.start()
         self.progress_var.set(f"Starting scan of {', '.join(drives_to_scan)}...")
+
+        # Track what we're scanning for cache invalidation
+        self.last_scanned_path = drives_to_scan[0] if len(drives_to_scan) == 1 else None
 
         # Start scan thread
         self.scan_thread = threading.Thread(target=self.scan_worker, args=(drives_to_scan,))
@@ -756,6 +810,7 @@ class DiskCleanerGUI:
                     self.large_files_tree.delete(item)
                     if item in self.selected_large_files:
                         self.selected_large_files.remove(item)
+                    self.invalidate_cache()
                     messagebox.showinfo("Success", "File deleted successfully")
                 except Exception as e:
                     messagebox.showerror("Error", f"Could not delete file: {e}")
@@ -793,6 +848,7 @@ class DiskCleanerGUI:
                     # Remove from our data dictionary
                     if item in self.duplicate_data:
                         del self.duplicate_data[item]
+                    self.invalidate_cache()
                     message = f"Successfully deleted {deleted_count} duplicate files"
                     if errors:
                         message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:3])
@@ -925,6 +981,10 @@ class DiskCleanerGUI:
         # Clean up selected set
         self.selected_large_files.clear()
 
+        # Invalidate cache if any files were deleted
+        if deleted_count > 0:
+            self.invalidate_cache()
+
         # Show results
         if deleted_count > 0:
             message = f"Successfully deleted {deleted_count} files"
@@ -1035,6 +1095,10 @@ class DiskCleanerGUI:
 
         # Clean up selected set
         self.selected_duplicates.clear()
+
+        # Invalidate cache if any files were deleted
+        if deleted_count > 0:
+            self.invalidate_cache()
 
         # Show results
         if deleted_count > 0:
