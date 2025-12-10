@@ -18,6 +18,9 @@ import queue
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import stat
+import pickle
+import json
+from pathlib import Path
 
 class DiskAnalyzer:
     def __init__(self, min_size_mb: int = 1):
@@ -28,6 +31,8 @@ class DiskAnalyzer:
         self.total_size = 0
         self.stop_scanning = False
         self.max_workers = min(4, os.cpu_count() or 1)  # Optimize thread count
+        self.cache_dir = Path.home() / '.disk_cleaner_cache'
+        self.cache_dir.mkdir(exist_ok=True)
         
     def get_available_drives(self) -> List[str]:
         """Get list of available drives on Windows"""
@@ -202,18 +207,87 @@ class DiskAnalyzer:
                     continue
         return total_waste
 
+    def get_cache_path(self, drive: str) -> Path:
+        """Get cache file path for a specific drive"""
+        # Sanitize drive name for filename
+        drive_name = drive.replace(':', '').replace('\\', '_').replace('/', '_')
+        return self.cache_dir / f'cache_{drive_name}.pkl'
+
+    def save_cache(self, drive: str):
+        """Save scan results to cache"""
+        try:
+            cache_data = {
+                'timestamp': time.time(),
+                'drive': drive,
+                'min_size_bytes': self.min_size_bytes,
+                'file_hashes': dict(self.file_hashes),
+                'large_files': self.large_files,
+                'scanned_files': self.scanned_files,
+                'total_size': self.total_size
+            }
+            cache_path = self.get_cache_path(drive)
+            with open(cache_path, 'wb') as f:
+                pickle.dump(cache_data, f)
+        except Exception as e:
+            print(f"Warning: Could not save cache: {e}")
+
+    def load_cache(self, drive: str, max_age_hours: int = 24) -> bool:
+        """Load scan results from cache if available and fresh"""
+        try:
+            cache_path = self.get_cache_path(drive)
+            if not cache_path.exists():
+                return False
+
+            with open(cache_path, 'rb') as f:
+                cache_data = pickle.load(f)
+
+            # Check cache age
+            cache_age = time.time() - cache_data['timestamp']
+            if cache_age > max_age_hours * 3600:
+                return False
+
+            # Check if min size matches
+            if cache_data['min_size_bytes'] != self.min_size_bytes:
+                return False
+
+            # Restore data
+            self.file_hashes = defaultdict(list, cache_data['file_hashes'])
+            self.large_files = cache_data['large_files']
+            self.scanned_files = cache_data['scanned_files']
+            self.total_size = cache_data['total_size']
+
+            return True
+        except Exception as e:
+            print(f"Warning: Could not load cache: {e}")
+            return False
+
+    def clear_cache(self, drive: str = None):
+        """Clear cache for a specific drive or all drives"""
+        try:
+            if drive:
+                cache_path = self.get_cache_path(drive)
+                if cache_path.exists():
+                    cache_path.unlink()
+            else:
+                for cache_file in self.cache_dir.glob('cache_*.pkl'):
+                    cache_file.unlink()
+        except Exception as e:
+            print(f"Warning: Could not clear cache: {e}")
+
 class DiskCleanerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Disk Cleaner - Space Analyzer & Duplicate Finder")
         self.root.geometry("1200x800")
-        
+
         self.analyzer = DiskAnalyzer()
         self.progress_queue = queue.Queue()
         self.scanning = False
         self.scan_thread = None
         self.duplicate_data = {}  # Store file paths by item ID
-        
+        self.selected_large_files = set()  # Track selected large files
+        self.selected_duplicates = set()  # Track selected duplicate groups
+
         self.setup_ui()
         self.check_progress_queue()
         
@@ -284,143 +358,169 @@ class DiskCleanerGUI:
         # Large files tab
         self.large_files_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.large_files_frame, text="📊 Largest Files")
-        
-        columns = ('Size', 'Path')
+
+        # Button frame for large files
+        large_files_btn_frame = ttk.Frame(self.large_files_frame)
+        large_files_btn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+
+        ttk.Button(large_files_btn_frame, text="Select All", command=self.select_all_large_files).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(large_files_btn_frame, text="Deselect All", command=self.deselect_all_large_files).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(large_files_btn_frame, text="Delete Selected", command=self.delete_selected_large_files,
+                   style='Danger.TButton').pack(side=tk.LEFT, padx=(10, 0))
+
+        columns = ('Select', 'Size', 'Path')
         self.large_files_tree = ttk.Treeview(self.large_files_frame, columns=columns, show='headings', height=20)
+        self.large_files_tree.heading('Select', text='☐')
         self.large_files_tree.heading('Size', text='Size')
         self.large_files_tree.heading('Path', text='File Path')
+        self.large_files_tree.column('Select', width=50, anchor='center')
         self.large_files_tree.column('Size', width=100)
-        self.large_files_tree.column('Path', width=800)
-        
+        self.large_files_tree.column('Path', width=750)
+
         large_files_scroll = ttk.Scrollbar(self.large_files_frame, orient=tk.VERTICAL, command=self.large_files_tree.yview)
         self.large_files_tree.configure(yscrollcommand=large_files_scroll.set)
-        
-        self.large_files_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        large_files_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        
+
+        self.large_files_tree.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        large_files_scroll.grid(row=1, column=1, sticky=(tk.N, tk.S))
+
         self.large_files_frame.columnconfigure(0, weight=1)
-        self.large_files_frame.rowconfigure(0, weight=1)
+        self.large_files_frame.rowconfigure(1, weight=1)
+
+        # Bind click event for checkbox column
+        self.large_files_tree.bind('<Button-1>', self.on_large_file_click)
         
         # Duplicates tab
         self.duplicates_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.duplicates_frame, text="🔍 Duplicate Files")
-        
+
         # Info and action buttons frame
         info_action_frame = ttk.Frame(self.duplicates_frame)
         info_action_frame.grid(row=0, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0, 10))
         info_action_frame.columnconfigure(0, weight=1)
-        
+
         self.duplicates_info = ttk.Label(info_action_frame, text="No duplicates found yet")
         self.duplicates_info.grid(row=0, column=0, sticky=tk.W)
-        
+
         # Action buttons for better accessibility
         action_buttons_frame = ttk.Frame(info_action_frame)
         action_buttons_frame.grid(row=0, column=1, sticky=tk.E)
-        
-        self.refresh_btn = ttk.Button(action_buttons_frame, text="🔄 Refresh", 
-                                     command=self.refresh_duplicates, width=12)
-        self.refresh_btn.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.open_locations_btn = ttk.Button(action_buttons_frame, text="📂 Open Locations", 
-                                            command=self.open_duplicate_locations, width=15)
-        self.open_locations_btn.pack(side=tk.LEFT)
-        
+
+        ttk.Button(action_buttons_frame, text="Select All", command=self.select_all_duplicates).pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(action_buttons_frame, text="Deselect All", command=self.deselect_all_duplicates).pack(side=tk.LEFT, padx=(0, 5))
+
+        self.refresh_btn = ttk.Button(action_buttons_frame, text="Refresh",
+                                     command=self.refresh_duplicates, width=10)
+        self.refresh_btn.pack(side=tk.LEFT, padx=(5, 5))
+
+        ttk.Button(action_buttons_frame, text="Delete Selected",
+                   command=self.delete_selected_duplicates_new,
+                   style='Danger.TButton', width=15).pack(side=tk.LEFT, padx=(5, 0))
+
         # Duplicates tree with improved layout
         tree_frame = ttk.Frame(self.duplicates_frame)
         tree_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S))
         tree_frame.columnconfigure(0, weight=1)
         tree_frame.rowconfigure(0, weight=1)
-        
-        dup_columns = ('Group', 'Count', 'Size', 'Waste', 'Files', 'Actions')
+
+        dup_columns = ('Select', 'Group', 'Count', 'Size', 'Waste', 'Files')
         self.duplicates_tree = ttk.Treeview(tree_frame, columns=dup_columns, show='headings', height=16)
-        
-        for col in dup_columns:
-            self.duplicates_tree.heading(col, text=col)
+
+        self.duplicates_tree.heading('Select', text='☐')
+        self.duplicates_tree.heading('Group', text='Group')
+        self.duplicates_tree.heading('Count', text='Count')
+        self.duplicates_tree.heading('Size', text='Size')
+        self.duplicates_tree.heading('Waste', text='Waste')
+        self.duplicates_tree.heading('Files', text='Files')
+
+        self.duplicates_tree.column('Select', width=50, anchor='center')
         self.duplicates_tree.column('Group', width=60)
         self.duplicates_tree.column('Count', width=60)
         self.duplicates_tree.column('Size', width=100)
         self.duplicates_tree.column('Waste', width=100)
-        self.duplicates_tree.column('Files', width=600)
-        self.duplicates_tree.column('Actions', width=120)
-        
+        self.duplicates_tree.column('Files', width=670)
+
         dup_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=self.duplicates_tree.yview)
         self.duplicates_tree.configure(yscrollcommand=dup_scroll.set)
-        
+
         self.duplicates_tree.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         dup_scroll.grid(row=0, column=1, sticky=(tk.N, tk.S))
-        
+
         self.duplicates_frame.columnconfigure(0, weight=1)
         self.duplicates_frame.rowconfigure(1, weight=1)
-        
-        # Commands tab
-        self.commands_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.commands_frame, text="💻 Delete Commands")
-        
-        instructions = ttk.Label(self.commands_frame, 
-                                text="Generated delete commands will appear here. Review carefully before executing!",
-                                font=('Arial', 10, 'bold'))
-        instructions.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
-        
-        self.commands_text = scrolledtext.ScrolledText(self.commands_frame, height=20, width=100)
-        self.commands_text.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S))
-        
-        button_frame = ttk.Frame(self.commands_frame)
-        button_frame.grid(row=2, column=0, columnspan=3, pady=(10, 0))
-        
-        ttk.Button(button_frame, text="💾 Save Commands", command=self.save_commands).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(button_frame, text="📋 Copy to Clipboard", command=self.copy_commands).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(button_frame, text="🗑 Clear Commands", command=self.clear_commands).pack(side=tk.LEFT)
-        
-        self.commands_frame.columnconfigure(0, weight=1)
-        self.commands_frame.rowconfigure(1, weight=1)
-        
-        # Bind right-click menus and double-click for actions
+
+        # Bind events
+        self.duplicates_tree.bind('<Button-1>', self.on_duplicate_click_new)
+        self.duplicates_tree.bind('<Double-1>', self.on_duplicate_double_click)
+
+        # Bind right-click menu for large files
         self.large_files_tree.bind("<Button-3>", self.show_large_files_menu)
-        self.duplicates_tree.bind("<Button-3>", self.show_duplicates_menu)
-        self.duplicates_tree.bind("<Double-1>", self.on_duplicate_action_click)
-        self.duplicates_tree.bind("<Button-1>", self.on_duplicate_click)
         
     def start_scan(self):
         """Start the disk scan"""
         if self.scanning:
             return
-            
+
         try:
             min_size = int(self.min_size_var.get())
         except ValueError:
             messagebox.showerror("Error", "Invalid minimum file size")
             return
-            
+
         # Reset analyzer
         self.analyzer = DiskAnalyzer(min_size_mb=min_size)
-        
+
         # Determine drives to scan
         drives_selection = self.drives_var.get()
         if drives_selection == 'All Drives':
             drives_to_scan = self.analyzer.get_available_drives()
         else:
             drives_to_scan = [drives_selection]
-        
+
         # Clear previous results
         self.clear_results()
-        
+
         # Update UI
         self.scanning = True
         self.scan_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.progress_bar.start()
         self.progress_var.set(f"Starting scan of {', '.join(drives_to_scan)}...")
-        
+
         # Start scan thread
         self.scan_thread = threading.Thread(target=self.scan_worker, args=(drives_to_scan,))
         self.scan_thread.daemon = True
         self.scan_thread.start()
         
     def scan_worker(self, drives_to_scan):
-        """Worker thread for scanning with optimizations"""
+        """Worker thread for scanning with optimizations and caching"""
         try:
             start_time = time.time()
-            
+            cache_used = False
+
+            # Try to load from cache for single drive scans
+            if len(drives_to_scan) == 1:
+                drive = drives_to_scan[0]
+                self.progress_queue.put(('status', f'Checking cache for {drive}...'))
+                if self.analyzer.load_cache(drive):
+                    cache_used = True
+                    self.progress_queue.put(('status', f'Loaded cached results for {drive}!'))
+                    scan_time = time.time() - start_time
+
+                    # Verify duplicates
+                    duplicates = self.analyzer.verify_duplicates_with_full_hash(self.progress_queue)
+
+                    # Send results
+                    self.progress_queue.put(('complete', {
+                        'scan_time': scan_time,
+                        'files_scanned': self.analyzer.scanned_files,
+                        'total_size': self.analyzer.total_size,
+                        'largest_files': self.analyzer.find_largest_files(100),
+                        'duplicates': duplicates,
+                        'cache_used': True
+                    }))
+                    return
+
+            # If no cache, perform full scan
             # Scan drives in parallel for better performance
             if len(drives_to_scan) > 1 and self.analyzer.max_workers > 1:
                 self.progress_queue.put(('status', 'Starting parallel drive scanning...'))
@@ -432,7 +532,7 @@ class DiskCleanerGUI:
                             futures.append(future)
                         else:
                             self.progress_queue.put(('status', f'Drive {drive} not accessible, skipping...'))
-                    
+
                     # Wait for all drives to complete
                     for future in as_completed(futures):
                         if self.analyzer.stop_scanning:
@@ -449,23 +549,29 @@ class DiskCleanerGUI:
                         self.analyzer.scan_directory(drive, self.progress_queue)
                     else:
                         self.progress_queue.put(('status', f'Drive {drive} not accessible, skipping...'))
-            
+
             if not self.analyzer.stop_scanning:
+                # Save cache for single drive scans
+                if len(drives_to_scan) == 1:
+                    self.progress_queue.put(('status', 'Saving scan results to cache...'))
+                    self.analyzer.save_cache(drives_to_scan[0])
+
                 # Verify duplicates with full hash for accuracy
                 self.progress_queue.put(('status', 'Verifying duplicates with full hash...'))
                 duplicates = self.analyzer.verify_duplicates_with_full_hash(self.progress_queue)
-                
+
                 scan_time = time.time() - start_time
-                
+
                 # Send results
                 self.progress_queue.put(('complete', {
                     'scan_time': scan_time,
                     'files_scanned': self.analyzer.scanned_files,
                     'total_size': self.analyzer.total_size,
                     'largest_files': self.analyzer.find_largest_files(100),
-                    'duplicates': duplicates
+                    'duplicates': duplicates,
+                    'cache_used': False
                 }))
-            
+
         except Exception as e:
             self.progress_queue.put(('error', str(e)))
         
@@ -509,14 +615,18 @@ class DiskCleanerGUI:
         self.scan_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.progress_bar.stop()
-        
+
         # Update progress
         scan_time = results['scan_time']
         files_scanned = results['files_scanned']
         total_size = self.analyzer.format_size(results['total_size'])
-        
-        self.progress_var.set(f"Scan complete! {files_scanned:,} files ({total_size}) in {scan_time:.1f}s")
-        
+        cache_used = results.get('cache_used', False)
+
+        if cache_used:
+            self.progress_var.set(f"Loaded from cache! {files_scanned:,} files ({total_size}) in {scan_time:.1f}s")
+        else:
+            self.progress_var.set(f"Scan complete! {files_scanned:,} files ({total_size}) in {scan_time:.1f}s")
+
         # Populate results
         self.populate_large_files(results['largest_files'])
         self.populate_duplicates(results['duplicates'])
@@ -542,23 +652,28 @@ class DiskCleanerGUI:
         """Populate the large files tree"""
         for item in self.large_files_tree.get_children():
             self.large_files_tree.delete(item)
-            
+
+        self.selected_large_files.clear()
+
         for size, filepath in largest_files:
-            self.large_files_tree.insert('', tk.END, values=(size, filepath))
+            self.large_files_tree.insert('', tk.END, values=('☐', size, filepath))
             
     def populate_duplicates(self, duplicates):
         """Populate the duplicates tree"""
         for item in self.duplicates_tree.get_children():
             self.duplicates_tree.delete(item)
-            
+
+        self.selected_duplicates.clear()
+        self.duplicate_data.clear()
+
         if not duplicates:
             self.duplicates_info.config(text="No duplicate files found")
             return
-            
+
         # Calculate total waste
         total_waste = self.analyzer.calculate_duplicate_waste(duplicates)
         self.duplicates_info.config(text=f"Found {len(duplicates)} duplicate groups, potential savings: {self.analyzer.format_size(total_waste)}")
-        
+
         # Sort by waste
         duplicate_groups = []
         for file_hash, filepaths in duplicates.items():
@@ -568,19 +683,19 @@ class DiskCleanerGUI:
                 duplicate_groups.append((waste, file_size, filepaths))
             except OSError:
                 continue
-                
+
         duplicate_groups.sort(reverse=True)
-        
+
         # Add to tree
         for i, (waste, file_size, filepaths) in enumerate(duplicate_groups[:50], 1):
             files_str = " | ".join(filepaths)
             item_id = self.duplicates_tree.insert('', tk.END, values=(
+                '☐',
                 f"#{i}",
                 len(filepaths),
                 self.analyzer.format_size(file_size),
                 self.analyzer.format_size(waste),
-                files_str,
-                "🗑️ Delete | 📂 Open"
+                files_str
             ))
             # Store the file paths in our data dictionary
             self.duplicate_data[item_id] = filepaths
@@ -614,99 +729,37 @@ class DiskCleanerGUI:
         menu.add_command(label="Delete File", command=self.delete_selected_file)
         menu.tk_popup(event.x_root, event.y_root)
         
-    def show_duplicates_menu(self, event):
-        """Show context menu for duplicates"""
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="🗑️ Delete Duplicates", command=self.delete_selected_duplicates)
-        menu.add_command(label="📂 Open File Locations", command=self.open_duplicate_locations)
-        menu.tk_popup(event.x_root, event.y_root)
         
     def open_file_location(self):
         """Open file location in explorer"""
         selection = self.large_files_tree.selection()
         if selection:
             item = selection[0]
-            filepath = self.large_files_tree.item(item)['values'][1]
+            filepath = self.large_files_tree.item(item)['values'][2]  # Updated index for checkbox column
             try:
                 subprocess.run(['explorer', '/select,', filepath])
             except Exception as e:
                 messagebox.showerror("Error", f"Could not open file location: {e}")
-                
-    def open_duplicate_locations(self):
-        """Open duplicate file locations"""
-        selection = self.duplicates_tree.selection()
-        if selection:
-            item = selection[0]
-            files_str = self.duplicates_tree.item(item)['values'][4]
-            filepaths = files_str.split(" | ")
-            
-            for filepath in filepaths[:3]:  # Limit to first 3 files
-                try:
-                    subprocess.run(['explorer', '/select,', filepath])
-                except Exception:
-                    pass
-                    
+
     def delete_selected_file(self):
-        """Delete selected file"""
+        """Delete selected file (from right-click menu)"""
         selection = self.large_files_tree.selection()
         if selection:
             item = selection[0]
-            filepath = self.large_files_tree.item(item)['values'][1]
-            
-            result = messagebox.askyesno("Confirm Delete", 
+            filepath = self.large_files_tree.item(item)['values'][2]  # Updated index for checkbox column
+
+            result = messagebox.askyesno("Confirm Delete",
                                        f"Are you sure you want to delete this file?\n\n{filepath}")
             if result:
                 try:
                     os.remove(filepath)
                     self.large_files_tree.delete(item)
+                    if item in self.selected_large_files:
+                        self.selected_large_files.remove(item)
                     messagebox.showinfo("Success", "File deleted successfully")
                 except Exception as e:
                     messagebox.showerror("Error", f"Could not delete file: {e}")
                     
-    def save_commands(self):
-        """Save commands to file"""
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".bat",
-            filetypes=[("Batch files", "*.bat"), ("Text files", "*.txt"), ("All files", "*.*")]
-        )
-        if filename:
-            try:
-                with open(filename, 'w') as f:
-                    f.write(self.commands_text.get(1.0, tk.END))
-                messagebox.showinfo("Success", f"Commands saved to {filename}")
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not save file: {e}")
-                
-    def copy_commands(self):
-        """Copy commands to clipboard"""
-        self.root.clipboard_clear()
-        self.root.clipboard_append(self.commands_text.get(1.0, tk.END))
-        messagebox.showinfo("Success", "Commands copied to clipboard")
-        
-    def clear_commands(self):
-        """Clear the commands text"""
-        self.commands_text.delete(1.0, tk.END)
-        
-    def on_duplicate_click(self, event):
-        """Handle clicks on duplicate tree items"""
-        item = self.duplicates_tree.identify('item', event.x, event.y)
-        column = self.duplicates_tree.identify('column', event.x, event.y)
-        
-        if item and column == '#6':  # Actions column
-            # Determine which action based on x position within the column
-            bbox = self.duplicates_tree.bbox(item, column)
-            if bbox:
-                relative_x = event.x - bbox[0]
-                if relative_x < bbox[2] // 2:  # Left half - Delete
-                    self.delete_duplicate_group(item)
-                else:  # Right half - Open
-                    self.open_duplicate_group_locations(item)
-    
-    def on_duplicate_action_click(self, event):
-        """Handle double-click on duplicate items"""
-        item = self.duplicates_tree.selection()[0] if self.duplicates_tree.selection() else None
-        if item:
-            self.open_duplicate_group_locations(item)
     
     def delete_duplicate_group(self, item):
         """Delete duplicates for a specific group"""
@@ -770,28 +823,233 @@ class DiskCleanerGUI:
             messagebox.showerror("Error", f"Could not open file locations: {e}")
     
     def delete_selected_duplicates(self):
-        """Delete duplicates for selected items"""
+        """Delete duplicates for selected items (old method, kept for compatibility)"""
         selection = self.duplicates_tree.selection()
         if not selection:
             messagebox.showwarning("No Selection", "Please select duplicate groups to delete")
             return
-        
+
         for item in selection:
             self.delete_duplicate_group(item)
-        
+
         # Refresh the duplicates list after deletion
         if selection:
             self.refresh_duplicates()
-    
+
     def clear_results(self):
         """Clear all results"""
         for item in self.large_files_tree.get_children():
             self.large_files_tree.delete(item)
         for item in self.duplicates_tree.get_children():
             self.duplicates_tree.delete(item)
-        self.duplicate_data.clear()  # Clear stored file paths
+        self.duplicate_data.clear()
+        self.selected_large_files.clear()
+        self.selected_duplicates.clear()
         self.duplicates_info.config(text="No duplicates found yet")
-        self.commands_text.delete(1.0, tk.END)
+
+    # New checkbox-based selection methods
+    def on_large_file_click(self, event):
+        """Handle clicks on large files tree"""
+        region = self.large_files_tree.identify('region', event.x, event.y)
+        if region == 'cell':
+            column = self.large_files_tree.identify_column(event.x)
+            item = self.large_files_tree.identify_row(event.y)
+
+            if column == '#1' and item:  # Checkbox column
+                self.toggle_large_file_selection(item)
+                return 'break'
+
+    def toggle_large_file_selection(self, item):
+        """Toggle selection of a large file"""
+        values = list(self.large_files_tree.item(item)['values'])
+        if item in self.selected_large_files:
+            self.selected_large_files.remove(item)
+            values[0] = '☐'
+        else:
+            self.selected_large_files.add(item)
+            values[0] = '☑'
+        self.large_files_tree.item(item, values=values)
+
+    def select_all_large_files(self):
+        """Select all large files"""
+        for item in self.large_files_tree.get_children():
+            if item not in self.selected_large_files:
+                self.selected_large_files.add(item)
+                values = list(self.large_files_tree.item(item)['values'])
+                values[0] = '☑'
+                self.large_files_tree.item(item, values=values)
+
+    def deselect_all_large_files(self):
+        """Deselect all large files"""
+        for item in self.large_files_tree.get_children():
+            if item in self.selected_large_files:
+                self.selected_large_files.remove(item)
+                values = list(self.large_files_tree.item(item)['values'])
+                values[0] = '☐'
+                self.large_files_tree.item(item, values=values)
+
+    def delete_selected_large_files(self):
+        """Delete all selected large files with confirmation"""
+        if not self.selected_large_files:
+            messagebox.showwarning("No Selection", "Please select files to delete using the checkboxes")
+            return
+
+        # Collect file paths
+        files_to_delete = []
+        for item in self.selected_large_files:
+            filepath = self.large_files_tree.item(item)['values'][2]
+            files_to_delete.append((item, filepath))
+
+        # Show confirmation
+        message = f"Delete {len(files_to_delete)} selected files?\n\n"
+        message += "\n".join(f"• {fp}" for _, fp in files_to_delete[:10])
+        if len(files_to_delete) > 10:
+            message += f"\n... and {len(files_to_delete) - 10} more files"
+
+        result = messagebox.askyesno("Confirm Delete", message)
+        if not result:
+            return
+
+        # Delete files
+        deleted_count = 0
+        errors = []
+
+        for item, filepath in files_to_delete:
+            try:
+                os.remove(filepath)
+                self.large_files_tree.delete(item)
+                deleted_count += 1
+            except Exception as e:
+                errors.append(f"{filepath}: {str(e)}")
+
+        # Clean up selected set
+        self.selected_large_files.clear()
+
+        # Show results
+        if deleted_count > 0:
+            message = f"Successfully deleted {deleted_count} files"
+            if errors:
+                message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:5])
+                if len(errors) > 5:
+                    message += f"\n... and {len(errors) - 5} more errors"
+            messagebox.showinfo("Delete Complete", message)
+        else:
+            messagebox.showerror("Delete Failed", "No files were deleted.\n\n" + "\n".join(errors[:5]))
+
+    def on_duplicate_click_new(self, event):
+        """Handle clicks on duplicates tree"""
+        region = self.duplicates_tree.identify('region', event.x, event.y)
+        if region == 'cell':
+            column = self.duplicates_tree.identify_column(event.x)
+            item = self.duplicates_tree.identify_row(event.y)
+
+            if column == '#1' and item:  # Checkbox column
+                self.toggle_duplicate_selection(item)
+                return 'break'
+
+    def on_duplicate_double_click(self, event):
+        """Handle double-click on duplicates to open file locations"""
+        item = self.duplicates_tree.selection()[0] if self.duplicates_tree.selection() else None
+        if item:
+            self.open_duplicate_group_locations(item)
+
+    def toggle_duplicate_selection(self, item):
+        """Toggle selection of a duplicate group"""
+        values = list(self.duplicates_tree.item(item)['values'])
+        if item in self.selected_duplicates:
+            self.selected_duplicates.remove(item)
+            values[0] = '☐'
+        else:
+            self.selected_duplicates.add(item)
+            values[0] = '☑'
+        self.duplicates_tree.item(item, values=values)
+
+    def select_all_duplicates(self):
+        """Select all duplicate groups"""
+        for item in self.duplicates_tree.get_children():
+            if item not in self.selected_duplicates:
+                self.selected_duplicates.add(item)
+                values = list(self.duplicates_tree.item(item)['values'])
+                values[0] = '☑'
+                self.duplicates_tree.item(item, values=values)
+
+    def deselect_all_duplicates(self):
+        """Deselect all duplicate groups"""
+        for item in self.duplicates_tree.get_children():
+            if item in self.selected_duplicates:
+                self.selected_duplicates.remove(item)
+                values = list(self.duplicates_tree.item(item)['values'])
+                values[0] = '☐'
+                self.duplicates_tree.item(item, values=values)
+
+    def delete_selected_duplicates_new(self):
+        """Delete all selected duplicate groups with confirmation"""
+        if not self.selected_duplicates:
+            messagebox.showwarning("No Selection", "Please select duplicate groups to delete using the checkboxes")
+            return
+
+        # Collect all files to delete
+        all_files_to_delete = []
+        total_groups = len(self.selected_duplicates)
+
+        for item in self.selected_duplicates:
+            filepaths = self.duplicate_data.get(item, [])
+            if len(filepaths) > 1:
+                # Keep first file, delete rest
+                files_to_delete = filepaths[1:]
+                all_files_to_delete.extend([(item, fp) for fp in files_to_delete])
+
+        if not all_files_to_delete:
+            messagebox.showinfo("No Files", "No duplicate files to delete")
+            return
+
+        # Show confirmation
+        message = f"Delete {len(all_files_to_delete)} duplicate files from {total_groups} groups?\n\n"
+        message += "First 10 files to be deleted:\n"
+        message += "\n".join(f"• {fp}" for _, fp in all_files_to_delete[:10])
+        if len(all_files_to_delete) > 10:
+            message += f"\n... and {len(all_files_to_delete) - 10} more files"
+
+        result = messagebox.askyesno("Confirm Delete Duplicates", message)
+        if not result:
+            return
+
+        # Delete files
+        deleted_count = 0
+        errors = []
+        deleted_items = set()
+
+        for item, filepath in all_files_to_delete:
+            try:
+                os.remove(filepath)
+                deleted_count += 1
+                deleted_items.add(item)
+            except Exception as e:
+                errors.append(f"{filepath}: {str(e)}")
+
+        # Remove deleted items from tree
+        for item in deleted_items:
+            self.duplicates_tree.delete(item)
+            if item in self.duplicate_data:
+                del self.duplicate_data[item]
+
+        # Clean up selected set
+        self.selected_duplicates.clear()
+
+        # Show results
+        if deleted_count > 0:
+            message = f"Successfully deleted {deleted_count} duplicate files from {len(deleted_items)} groups"
+            if errors:
+                message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:5])
+                if len(errors) > 5:
+                    message += f"\n... and {len(errors) - 5} more errors"
+            messagebox.showinfo("Delete Complete", message)
+
+            # Refresh duplicates if needed
+            if not errors:
+                self.refresh_duplicates()
+        else:
+            messagebox.showerror("Delete Failed", "No files were deleted.\n\n" + "\n".join(errors[:10]))
 
 def main():
     root = tk.Tk()
