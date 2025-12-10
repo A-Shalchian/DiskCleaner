@@ -22,6 +22,14 @@ import pickle
 import json
 from pathlib import Path
 
+# Try to import send2trash for Recycle Bin support
+try:
+    from send2trash import send2trash
+    RECYCLE_BIN_AVAILABLE = True
+except ImportError:
+    RECYCLE_BIN_AVAILABLE = False
+    send2trash = None
+
 # File type categories for filtering
 FILE_CATEGORIES = {
     'All Files': None,  # No filter
@@ -312,6 +320,7 @@ class DiskCleanerGUI:
         self.last_scanned_path = None  # Track what was last scanned for cache invalidation
         self.all_large_files = []  # Store all large files for filtering
         self.current_filter = 'All Files'  # Current file type filter
+        self.use_recycle_bin = tk.BooleanVar(value=RECYCLE_BIN_AVAILABLE)  # Use Recycle Bin by default if available
 
         self.setup_ui()
         self.check_progress_queue()
@@ -354,7 +363,28 @@ class DiskCleanerGUI:
         self.min_size_var = tk.StringVar(value="1")
         min_size_entry = ttk.Entry(settings_frame, textvariable=self.min_size_var, width=10)
         min_size_entry.grid(row=0, column=4, sticky=tk.W)
-        
+
+        # Delete settings row
+        delete_settings_frame = ttk.Frame(settings_frame)
+        delete_settings_frame.grid(row=1, column=0, columnspan=5, sticky=tk.W, pady=(10, 0))
+
+        # Recycle Bin checkbox
+        self.recycle_bin_check = ttk.Checkbutton(
+            delete_settings_frame,
+            text="🗑️ Move to Recycle Bin (safer)",
+            variable=self.use_recycle_bin,
+            command=self.on_recycle_bin_toggle
+        )
+        self.recycle_bin_check.pack(side=tk.LEFT, padx=(0, 20))
+
+        # Status label for Recycle Bin availability
+        if RECYCLE_BIN_AVAILABLE:
+            recycle_status = ttk.Label(delete_settings_frame, text="✓ send2trash installed", foreground='green')
+        else:
+            recycle_status = ttk.Label(delete_settings_frame, text="⚠ send2trash not installed - using permanent delete", foreground='orange')
+            self.recycle_bin_check.config(state=tk.DISABLED)
+        recycle_status.pack(side=tk.LEFT)
+
         # Control buttons
         control_frame = ttk.Frame(main_frame)
         control_frame.grid(row=2, column=0, columnspan=3, pady=(0, 10))
@@ -563,6 +593,34 @@ class DiskCleanerGUI:
         self.analyzer.clear_cache()  # Clears all cache when no drive specified
         self.progress_var.set("Cache cleared - next scan will be fresh")
         self.log("INFO", "Cache cleared by user")
+
+    def on_recycle_bin_toggle(self):
+        """Handle Recycle Bin checkbox toggle"""
+        if self.use_recycle_bin.get():
+            self.log("INFO", "Delete mode: Move to Recycle Bin")
+        else:
+            self.log("INFO", "Delete mode: Permanent delete")
+
+    def delete_file(self, filepath: str) -> Tuple[bool, str]:
+        """
+        Delete a file using either Recycle Bin or permanent delete.
+        Returns (success, error_message)
+        """
+        try:
+            if self.use_recycle_bin.get() and RECYCLE_BIN_AVAILABLE:
+                send2trash(filepath)
+                return True, ""
+            else:
+                os.remove(filepath)
+                return True, ""
+        except Exception as e:
+            return False, str(e)
+
+    def get_delete_action_text(self) -> str:
+        """Get the appropriate text for delete action based on mode"""
+        if self.use_recycle_bin.get() and RECYCLE_BIN_AVAILABLE:
+            return "Move to Recycle Bin"
+        return "Permanently delete"
 
     def log(self, level: str, message: str):
         """Add a log entry with timestamp"""
@@ -1028,18 +1086,24 @@ class DiskCleanerGUI:
             item = selection[0]
             filepath = self.large_files_tree.item(item)['values'][2]  # Updated index for checkbox column
 
+            action = self.get_delete_action_text()
             result = messagebox.askyesno("Confirm Delete",
-                                       f"Are you sure you want to delete this file?\n\n{filepath}")
+                                       f"{action} this file?\n\n{filepath}")
             if result:
-                try:
-                    os.remove(filepath)
+                success, error = self.delete_file(filepath)
+                if success:
                     self.large_files_tree.delete(item)
                     if item in self.selected_large_files:
                         self.selected_large_files.remove(item)
                     self.invalidate_cache()
-                    messagebox.showinfo("Success", "File deleted successfully")
-                except Exception as e:
-                    messagebox.showerror("Error", f"Could not delete file: {e}")
+                    self.log("SUCCESS", f"Deleted: {filepath}")
+                    if self.use_recycle_bin.get() and RECYCLE_BIN_AVAILABLE:
+                        messagebox.showinfo("Success", "File moved to Recycle Bin")
+                    else:
+                        messagebox.showinfo("Success", "File deleted permanently")
+                else:
+                    self.log("ERROR", f"Failed to delete {filepath}: {error}")
+                    messagebox.showerror("Error", f"Could not delete file: {error}")
                     
     
     def delete_duplicate_group(self, item):
@@ -1048,26 +1112,27 @@ class DiskCleanerGUI:
             filepaths = self.duplicate_data.get(item, [])
             if not filepaths or len(filepaths) <= 1:
                 return
-            
+
+            action = self.get_delete_action_text()
             # Show confirmation dialog
             files_to_delete = filepaths[1:]  # Keep first file, delete rest
-            message = f"Delete {len(files_to_delete)} duplicate files?\n\nKeep: {filepaths[0]}\n\nDelete:\n"
+            message = f"{action} {len(files_to_delete)} duplicate files?\n\nKeep: {filepaths[0]}\n\nDelete:\n"
             message += "\n".join(f"• {fp}" for fp in files_to_delete[:5])
             if len(files_to_delete) > 5:
                 message += f"\n... and {len(files_to_delete) - 5} more"
-            
+
             result = messagebox.askyesno("Confirm Delete Duplicates", message)
             if result:
                 deleted_count = 0
                 errors = []
-                
+
                 for filepath in files_to_delete:
-                    try:
-                        os.remove(filepath)
+                    success, error = self.delete_file(filepath)
+                    if success:
                         deleted_count += 1
-                    except Exception as e:
-                        errors.append(f"{filepath}: {str(e)}")
-                
+                    else:
+                        errors.append(f"{filepath}: {error}")
+
                 # Show results
                 if deleted_count > 0:
                     self.duplicates_tree.delete(item)
@@ -1075,7 +1140,10 @@ class DiskCleanerGUI:
                     if item in self.duplicate_data:
                         del self.duplicate_data[item]
                     self.invalidate_cache()
-                    message = f"Successfully deleted {deleted_count} duplicate files"
+                    if self.use_recycle_bin.get() and RECYCLE_BIN_AVAILABLE:
+                        message = f"Moved {deleted_count} duplicate files to Recycle Bin"
+                    else:
+                        message = f"Permanently deleted {deleted_count} duplicate files"
                     if errors:
                         message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:3])
                         if len(errors) > 3:
@@ -1083,7 +1151,7 @@ class DiskCleanerGUI:
                     messagebox.showinfo("Delete Complete", message)
                 else:
                     messagebox.showerror("Delete Failed", "No files were deleted.\n\n" + "\n".join(errors[:5]))
-                    
+
         except Exception as e:
             messagebox.showerror("Error", f"Could not delete duplicates: {e}")
     
@@ -1179,6 +1247,8 @@ class DiskCleanerGUI:
             messagebox.showwarning("No Selection", "Please select files to delete using the checkboxes")
             return
 
+        action = self.get_delete_action_text()
+
         # Collect file paths
         files_to_delete = []
         for item in self.selected_large_files:
@@ -1186,7 +1256,7 @@ class DiskCleanerGUI:
             files_to_delete.append((item, filepath))
 
         # Show confirmation
-        message = f"Delete {len(files_to_delete)} selected files?\n\n"
+        message = f"{action} {len(files_to_delete)} selected files?\n\n"
         message += "\n".join(f"• {fp}" for _, fp in files_to_delete[:10])
         if len(files_to_delete) > 10:
             message += f"\n... and {len(files_to_delete) - 10} more files"
@@ -1200,12 +1270,12 @@ class DiskCleanerGUI:
         errors = []
 
         for item, filepath in files_to_delete:
-            try:
-                os.remove(filepath)
+            success, error = self.delete_file(filepath)
+            if success:
                 self.large_files_tree.delete(item)
                 deleted_count += 1
-            except Exception as e:
-                errors.append(f"{filepath}: {str(e)}")
+            else:
+                errors.append(f"{filepath}: {error}")
 
         # Clean up selected set
         self.selected_large_files.clear()
@@ -1216,8 +1286,12 @@ class DiskCleanerGUI:
 
         # Show results and log
         if deleted_count > 0:
-            self.log("SUCCESS", f"Deleted {deleted_count} large files")
-            message = f"Successfully deleted {deleted_count} files"
+            if self.use_recycle_bin.get() and RECYCLE_BIN_AVAILABLE:
+                self.log("SUCCESS", f"Moved {deleted_count} files to Recycle Bin")
+                message = f"Moved {deleted_count} files to Recycle Bin"
+            else:
+                self.log("SUCCESS", f"Permanently deleted {deleted_count} files")
+                message = f"Permanently deleted {deleted_count} files"
             if errors:
                 message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:5])
                 if len(errors) > 5:
@@ -1281,6 +1355,8 @@ class DiskCleanerGUI:
             messagebox.showwarning("No Selection", "Please select duplicate groups to delete using the checkboxes")
             return
 
+        action = self.get_delete_action_text()
+
         # Collect all files to delete
         all_files_to_delete = []
         total_groups = len(self.selected_duplicates)
@@ -1297,7 +1373,7 @@ class DiskCleanerGUI:
             return
 
         # Show confirmation
-        message = f"Delete {len(all_files_to_delete)} duplicate files from {total_groups} groups?\n\n"
+        message = f"{action} {len(all_files_to_delete)} duplicate files from {total_groups} groups?\n\n"
         message += "First 10 files to be deleted:\n"
         message += "\n".join(f"• {fp}" for _, fp in all_files_to_delete[:10])
         if len(all_files_to_delete) > 10:
@@ -1313,12 +1389,12 @@ class DiskCleanerGUI:
         deleted_items = set()
 
         for item, filepath in all_files_to_delete:
-            try:
-                os.remove(filepath)
+            success, error = self.delete_file(filepath)
+            if success:
                 deleted_count += 1
                 deleted_items.add(item)
-            except Exception as e:
-                errors.append(f"{filepath}: {str(e)}")
+            else:
+                errors.append(f"{filepath}: {error}")
 
         # Remove deleted items from tree
         for item in deleted_items:
@@ -1335,8 +1411,12 @@ class DiskCleanerGUI:
 
         # Show results and log
         if deleted_count > 0:
-            self.log("SUCCESS", f"Deleted {deleted_count} duplicate files from {len(deleted_items)} groups")
-            message = f"Successfully deleted {deleted_count} duplicate files from {len(deleted_items)} groups"
+            if self.use_recycle_bin.get() and RECYCLE_BIN_AVAILABLE:
+                self.log("SUCCESS", f"Moved {deleted_count} duplicate files to Recycle Bin from {len(deleted_items)} groups")
+                message = f"Moved {deleted_count} duplicate files to Recycle Bin from {len(deleted_items)} groups"
+            else:
+                self.log("SUCCESS", f"Permanently deleted {deleted_count} duplicate files from {len(deleted_items)} groups")
+                message = f"Permanently deleted {deleted_count} duplicate files from {len(deleted_items)} groups"
             if errors:
                 message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:5])
                 if len(errors) > 5:

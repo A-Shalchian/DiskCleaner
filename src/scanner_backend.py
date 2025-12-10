@@ -15,6 +15,14 @@ from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import stat
 
+# Try to import send2trash for Recycle Bin support
+try:
+    from send2trash import send2trash
+    RECYCLE_BIN_AVAILABLE = True
+except ImportError:
+    RECYCLE_BIN_AVAILABLE = False
+    send2trash = None
+
 # File type categories for filtering
 FILE_CATEGORIES = {
     'All Files': None,  # No filter
@@ -48,6 +56,22 @@ def send_log(level: str, message: str):
         'message': message,
         'timestamp': timestamp
     }), flush=True)
+
+
+def delete_file(filepath: str, use_recycle_bin: bool = True) -> Tuple[bool, str]:
+    """
+    Delete a file using either Recycle Bin or permanent delete.
+    Returns (success, error_message)
+    """
+    try:
+        if use_recycle_bin and RECYCLE_BIN_AVAILABLE:
+            send2trash(filepath)
+            return True, ""
+        else:
+            os.remove(filepath)
+            return True, ""
+    except Exception as e:
+        return False, str(e)
 
 
 class DiskAnalyzer:
@@ -412,27 +436,45 @@ def main():
             elif cmd_type == 'delete_files':
                 # Handle file deletion
                 files_to_delete = command.get('files', [])
-                send_log('INFO', f'Delete request for {len(files_to_delete)} files')
+                use_recycle_bin = command.get('useRecycleBin', True)  # Default to Recycle Bin
+
+                mode_text = "Recycle Bin" if (use_recycle_bin and RECYCLE_BIN_AVAILABLE) else "permanent delete"
+                send_log('INFO', f'Delete request for {len(files_to_delete)} files (mode: {mode_text})')
+
                 deleted_count = 0
                 errors = []
 
                 for filepath in files_to_delete:
-                    try:
-                        os.remove(filepath)
+                    success, error = delete_file(filepath, use_recycle_bin)
+                    if success:
                         deleted_count += 1
                         send_log('DEBUG', f'Deleted: {filepath}')
-                    except Exception as e:
-                        errors.append(f"{filepath}: {str(e)}")
-                        send_log('ERROR', f'Failed to delete {filepath}: {str(e)}')
+                    else:
+                        errors.append(f"{filepath}: {error}")
+                        send_log('ERROR', f'Failed to delete {filepath}: {error}')
 
                 if deleted_count > 0:
-                    send_log('SUCCESS', f'Deleted {deleted_count} files')
+                    if use_recycle_bin and RECYCLE_BIN_AVAILABLE:
+                        send_log('SUCCESS', f'Moved {deleted_count} files to Recycle Bin')
+                    else:
+                        send_log('SUCCESS', f'Permanently deleted {deleted_count} files')
 
                 print(json.dumps({
                     'type': 'result',
                     'data': {
                         'deletedCount': deleted_count,
-                        'errors': errors
+                        'errors': errors,
+                        'usedRecycleBin': use_recycle_bin and RECYCLE_BIN_AVAILABLE
+                    }
+                }), flush=True)
+
+            elif cmd_type == 'get_recycle_bin_status':
+                # Return whether Recycle Bin is available
+                print(json.dumps({
+                    'type': 'result',
+                    'data': {
+                        'available': RECYCLE_BIN_AVAILABLE,
+                        'message': 'send2trash installed' if RECYCLE_BIN_AVAILABLE else 'send2trash not installed - permanent delete only'
                     }
                 }), flush=True)
 
