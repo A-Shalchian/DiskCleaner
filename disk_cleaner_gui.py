@@ -22,6 +22,28 @@ import pickle
 import json
 from pathlib import Path
 
+# File type categories for filtering
+FILE_CATEGORIES = {
+    'All Files': None,  # No filter
+    'Videos': {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg', '.3gp'},
+    'Images': {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg', '.ico', '.raw', '.heic', '.heif'},
+    'Audio': {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff'},
+    'Documents': {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.rtf', '.odt', '.ods', '.odp', '.csv'},
+    'Archives': {'.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.iso', '.cab'},
+    'Executables': {'.exe', '.msi', '.dll', '.bat', '.cmd', '.ps1', '.sh', '.app', '.dmg'},
+    'Code': {'.py', '.js', '.ts', '.java', '.cpp', '.c', '.h', '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.html', '.css', '.json', '.xml', '.yaml', '.yml'},
+    'Databases': {'.db', '.sqlite', '.sqlite3', '.mdb', '.accdb', '.sql'},
+    'Disk Images': {'.iso', '.img', '.vhd', '.vhdx', '.vmdk', '.qcow2'},
+}
+
+def get_file_category(filepath: str) -> str:
+    """Get the category of a file based on its extension"""
+    ext = os.path.splitext(filepath)[1].lower()
+    for category, extensions in FILE_CATEGORIES.items():
+        if extensions and ext in extensions:
+            return category
+    return 'Other'
+
 class DiskAnalyzer:
     def __init__(self, min_size_mb: int = 1):
         self.min_size_bytes = min_size_mb * 1024 * 1024
@@ -288,6 +310,8 @@ class DiskCleanerGUI:
         self.selected_large_files = set()  # Track selected large files
         self.selected_duplicates = set()  # Track selected duplicate groups
         self.last_scanned_path = None  # Track what was last scanned for cache invalidation
+        self.all_large_files = []  # Store all large files for filtering
+        self.current_filter = 'All Files'  # Current file type filter
 
         self.setup_ui()
         self.check_progress_queue()
@@ -367,9 +391,31 @@ class DiskCleanerGUI:
         self.large_files_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.large_files_frame, text="📊 Largest Files")
 
+        # Top control frame for large files
+        large_files_top_frame = ttk.Frame(self.large_files_frame)
+        large_files_top_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 5))
+        large_files_top_frame.columnconfigure(1, weight=1)
+
+        # Filter controls (left side)
+        filter_frame = ttk.Frame(large_files_top_frame)
+        filter_frame.grid(row=0, column=0, sticky=tk.W)
+
+        ttk.Label(filter_frame, text="Filter by type:").pack(side=tk.LEFT, padx=(0, 5))
+        self.filter_var = tk.StringVar(value='All Files')
+        self.filter_combo = ttk.Combobox(filter_frame, textvariable=self.filter_var, width=15, state='readonly')
+        self.filter_combo['values'] = list(FILE_CATEGORIES.keys()) + ['Other']
+        self.filter_combo.pack(side=tk.LEFT, padx=(0, 10))
+        self.filter_combo.bind('<<ComboboxSelected>>', self.on_filter_changed)
+
+        # Category summary label (right side)
+        self.category_summary_var = tk.StringVar(value="")
+        self.category_summary_label = ttk.Label(large_files_top_frame, textvariable=self.category_summary_var,
+                                                 font=('Arial', 9))
+        self.category_summary_label.grid(row=0, column=1, sticky=tk.E, padx=(10, 0))
+
         # Button frame for large files
         large_files_btn_frame = ttk.Frame(self.large_files_frame)
-        large_files_btn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        large_files_btn_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         ttk.Button(large_files_btn_frame, text="Select All", command=self.select_all_large_files).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(large_files_btn_frame, text="Deselect All", command=self.deselect_all_large_files).pack(side=tk.LEFT, padx=(0, 5))
@@ -388,11 +434,11 @@ class DiskCleanerGUI:
         large_files_scroll = ttk.Scrollbar(self.large_files_frame, orient=tk.VERTICAL, command=self.large_files_tree.yview)
         self.large_files_tree.configure(yscrollcommand=large_files_scroll.set)
 
-        self.large_files_tree.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-        large_files_scroll.grid(row=1, column=1, sticky=(tk.N, tk.S))
+        self.large_files_tree.grid(row=2, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        large_files_scroll.grid(row=2, column=1, sticky=(tk.N, tk.S))
 
         self.large_files_frame.columnconfigure(0, weight=1)
-        self.large_files_frame.rowconfigure(1, weight=1)
+        self.large_files_frame.rowconfigure(2, weight=1)
 
         # Bind click event for checkbox column
         self.large_files_tree.bind('<Button-1>', self.on_large_file_click)
@@ -463,6 +509,45 @@ class DiskCleanerGUI:
         # Bind right-click menu for large files
         self.large_files_tree.bind("<Button-3>", self.show_large_files_menu)
 
+        # Logs tab
+        self.logs_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.logs_frame, text="📋 Logs")
+
+        # Logs control frame
+        logs_control_frame = ttk.Frame(self.logs_frame)
+        logs_control_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 5))
+
+        ttk.Button(logs_control_frame, text="Clear Logs", command=self.clear_logs).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(logs_control_frame, text="Copy to Clipboard", command=self.copy_logs).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(logs_control_frame, text="Save Logs", command=self.save_logs).pack(side=tk.LEFT)
+
+        # Log level filter
+        ttk.Label(logs_control_frame, text="    Filter:").pack(side=tk.LEFT, padx=(20, 5))
+        self.log_filter_var = tk.StringVar(value='All')
+        log_filter_combo = ttk.Combobox(logs_control_frame, textvariable=self.log_filter_var,
+                                        values=['All', 'INFO', 'WARNING', 'ERROR', 'DEBUG'],
+                                        width=10, state='readonly')
+        log_filter_combo.pack(side=tk.LEFT)
+        log_filter_combo.bind('<<ComboboxSelected>>', self.filter_logs)
+
+        # Logs text area
+        self.logs_text = scrolledtext.ScrolledText(self.logs_frame, height=20, width=100,
+                                                    font=('Consolas', 9), state=tk.DISABLED)
+        self.logs_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+
+        self.logs_frame.columnconfigure(0, weight=1)
+        self.logs_frame.rowconfigure(1, weight=1)
+
+        # Configure log text tags for different levels
+        self.logs_text.tag_configure('INFO', foreground='black')
+        self.logs_text.tag_configure('WARNING', foreground='orange')
+        self.logs_text.tag_configure('ERROR', foreground='red')
+        self.logs_text.tag_configure('DEBUG', foreground='gray')
+        self.logs_text.tag_configure('SUCCESS', foreground='green')
+
+        # Store all logs for filtering
+        self.all_logs = []
+
     def update_drives_list(self):
         """Update the drives/directories combo box"""
         drives = self.analyzer.get_available_drives()
@@ -477,6 +562,72 @@ class DiskCleanerGUI:
         """Clear all cached scan results"""
         self.analyzer.clear_cache()  # Clears all cache when no drive specified
         self.progress_var.set("Cache cleared - next scan will be fresh")
+        self.log("INFO", "Cache cleared by user")
+
+    def log(self, level: str, message: str):
+        """Add a log entry with timestamp"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] [{level}] {message}"
+
+        # Store log entry
+        self.all_logs.append((level, log_entry))
+
+        # Check if this log should be displayed based on current filter
+        current_filter = self.log_filter_var.get()
+        if current_filter == 'All' or current_filter == level:
+            self._append_log(level, log_entry)
+
+    def _append_log(self, level: str, log_entry: str):
+        """Append a log entry to the text widget"""
+        self.logs_text.config(state=tk.NORMAL)
+        self.logs_text.insert(tk.END, log_entry + "\n", level)
+        self.logs_text.see(tk.END)  # Auto-scroll to bottom
+        self.logs_text.config(state=tk.DISABLED)
+
+    def clear_logs(self):
+        """Clear all logs"""
+        self.logs_text.config(state=tk.NORMAL)
+        self.logs_text.delete(1.0, tk.END)
+        self.logs_text.config(state=tk.DISABLED)
+        self.all_logs.clear()
+
+    def copy_logs(self):
+        """Copy logs to clipboard"""
+        self.root.clipboard_clear()
+        logs_content = "\n".join(entry for _, entry in self.all_logs)
+        self.root.clipboard_append(logs_content)
+        self.log("INFO", "Logs copied to clipboard")
+
+    def save_logs(self):
+        """Save logs to file"""
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".log",
+            filetypes=[("Log files", "*.log"), ("Text files", "*.txt"), ("All files", "*.*")],
+            title="Save Logs"
+        )
+        if filename:
+            try:
+                with open(filename, 'w') as f:
+                    for _, entry in self.all_logs:
+                        f.write(entry + "\n")
+                self.log("SUCCESS", f"Logs saved to {filename}")
+            except Exception as e:
+                self.log("ERROR", f"Failed to save logs: {e}")
+
+    def filter_logs(self, event=None):
+        """Filter displayed logs by level"""
+        current_filter = self.log_filter_var.get()
+
+        self.logs_text.config(state=tk.NORMAL)
+        self.logs_text.delete(1.0, tk.END)
+
+        for level, entry in self.all_logs:
+            if current_filter == 'All' or current_filter == level:
+                self.logs_text.insert(tk.END, entry + "\n", level)
+
+        self.logs_text.see(tk.END)
+        self.logs_text.config(state=tk.DISABLED)
 
     def browse_directory(self):
         """Open directory browser and add selected directory to scan options"""
@@ -536,6 +687,9 @@ class DiskCleanerGUI:
         self.stop_button.config(state=tk.NORMAL)
         self.progress_bar.start()
         self.progress_var.set(f"Starting scan of {', '.join(drives_to_scan)}...")
+
+        # Log scan start
+        self.log("INFO", f"Starting scan: {', '.join(drives_to_scan)} (min size: {min_size}MB)")
 
         # Track what we're scanning for cache invalidation
         self.last_scanned_path = drives_to_scan[0] if len(drives_to_scan) == 1 else None
@@ -633,33 +787,36 @@ class DiskCleanerGUI:
         """Stop the current scan"""
         self.analyzer.stop_scanning = True
         self.progress_var.set("Stopping scan...")
+        self.log("WARNING", "Scan stopped by user")
         
     def check_progress_queue(self):
         """Check for progress updates"""
         try:
             while True:
                 msg_type, *data = self.progress_queue.get_nowait()
-                
+
                 if msg_type == 'progress':
                     files_scanned, current_file = data
                     self.progress_var.set(f"Scanned {files_scanned:,} files... {current_file[:60]}...")
-                    
+                    self.log("DEBUG", f"Scanned {files_scanned:,} files - {current_file}")
+
                 elif msg_type == 'status':
                     status = data[0]
                     self.progress_var.set(status)
-                    
+                    self.log("INFO", status)
+
                 elif msg_type == 'complete':
                     self.scan_complete(data[0])
-                    
+
                 elif msg_type == 'refresh_complete':
                     self.refresh_complete(data[0])
-                    
+
                 elif msg_type == 'error':
                     self.scan_error(data[0])
-                    
+
         except queue.Empty:
             pass
-        
+
         # Schedule next check
         self.root.after(100, self.check_progress_queue)
         
@@ -678,8 +835,15 @@ class DiskCleanerGUI:
 
         if cache_used:
             self.progress_var.set(f"Loaded from cache! {files_scanned:,} files ({total_size}) in {scan_time:.1f}s")
+            self.log("SUCCESS", f"Loaded from cache: {files_scanned:,} files ({total_size}) in {scan_time:.1f}s")
         else:
             self.progress_var.set(f"Scan complete! {files_scanned:,} files ({total_size}) in {scan_time:.1f}s")
+            self.log("SUCCESS", f"Scan complete: {files_scanned:,} files ({total_size}) in {scan_time:.1f}s")
+
+        # Log summary
+        num_large_files = len(results['largest_files'])
+        num_duplicates = len(results['duplicates'])
+        self.log("INFO", f"Found {num_large_files} large files and {num_duplicates} duplicate groups")
 
         # Populate results
         self.populate_large_files(results['largest_files'])
@@ -689,6 +853,7 @@ class DiskCleanerGUI:
         """Handle refresh completion"""
         self.progress_bar.stop()
         self.progress_var.set("Refresh complete!")
+        self.log("SUCCESS", f"Refresh complete - {len(duplicates)} duplicate groups")
         
         # Update duplicates display
         self.populate_duplicates(duplicates)
@@ -700,17 +865,78 @@ class DiskCleanerGUI:
         self.stop_button.config(state=tk.DISABLED)
         self.progress_bar.stop()
         self.progress_var.set(f"Scan error: {error_msg}")
+        self.log("ERROR", f"Scan error: {error_msg}")
         messagebox.showerror("Scan Error", f"An error occurred during scanning:\n{error_msg}")
         
     def populate_large_files(self, largest_files):
         """Populate the large files tree"""
+        # Store all files for filtering
+        self.all_large_files = largest_files
+        self.current_filter = 'All Files'
+        self.filter_var.set('All Files')
+
+        # Calculate and display category breakdown
+        self.update_category_summary()
+
+        # Apply filter and display
+        self.apply_file_filter()
+
+    def update_category_summary(self):
+        """Calculate and update the category breakdown summary"""
+        if not self.all_large_files:
+            self.category_summary_var.set("")
+            return
+
+        # Calculate totals by category
+        category_sizes = defaultdict(int)
+        category_counts = defaultdict(int)
+
+        for size, filepath in self.all_large_files:
+            # Parse size string back to bytes for calculation
+            category = get_file_category(filepath)
+            try:
+                # Get actual file size if possible
+                actual_size = os.path.getsize(filepath)
+                category_sizes[category] += actual_size
+                category_counts[category] += 1
+            except OSError:
+                category_counts[category] += 1
+
+        # Build summary string (top 4 categories by size)
+        sorted_categories = sorted(category_sizes.items(), key=lambda x: x[1], reverse=True)[:4]
+        summary_parts = []
+        for cat, size in sorted_categories:
+            summary_parts.append(f"{cat}: {self.analyzer.format_size(size)}")
+
+        if summary_parts:
+            self.category_summary_var.set(" | ".join(summary_parts))
+        else:
+            self.category_summary_var.set("")
+
+    def apply_file_filter(self):
+        """Apply the current filter to the large files list"""
+        # Clear current display
         for item in self.large_files_tree.get_children():
             self.large_files_tree.delete(item)
 
         self.selected_large_files.clear()
 
-        for size, filepath in largest_files:
-            self.large_files_tree.insert('', tk.END, values=('☐', size, filepath))
+        # Get filter
+        filter_category = self.filter_var.get()
+
+        # Filter and display files
+        for size, filepath in self.all_large_files:
+            if filter_category == 'All Files':
+                self.large_files_tree.insert('', tk.END, values=('☐', size, filepath))
+            else:
+                file_category = get_file_category(filepath)
+                if file_category == filter_category:
+                    self.large_files_tree.insert('', tk.END, values=('☐', size, filepath))
+
+    def on_filter_changed(self, event=None):
+        """Handle filter dropdown change"""
+        self.current_filter = self.filter_var.get()
+        self.apply_file_filter()
             
     def populate_duplicates(self, duplicates):
         """Populate the duplicates tree"""
@@ -901,6 +1127,9 @@ class DiskCleanerGUI:
         self.duplicate_data.clear()
         self.selected_large_files.clear()
         self.selected_duplicates.clear()
+        self.all_large_files.clear()
+        self.filter_var.set('All Files')
+        self.category_summary_var.set("")
         self.duplicates_info.config(text="No duplicates found yet")
 
     # New checkbox-based selection methods
@@ -985,15 +1214,19 @@ class DiskCleanerGUI:
         if deleted_count > 0:
             self.invalidate_cache()
 
-        # Show results
+        # Show results and log
         if deleted_count > 0:
+            self.log("SUCCESS", f"Deleted {deleted_count} large files")
             message = f"Successfully deleted {deleted_count} files"
             if errors:
                 message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:5])
                 if len(errors) > 5:
                     message += f"\n... and {len(errors) - 5} more errors"
+                for err in errors:
+                    self.log("ERROR", f"Delete failed: {err}")
             messagebox.showinfo("Delete Complete", message)
         else:
+            self.log("ERROR", f"Delete failed - no files deleted")
             messagebox.showerror("Delete Failed", "No files were deleted.\n\n" + "\n".join(errors[:5]))
 
     def on_duplicate_click_new(self, event):
@@ -1100,19 +1333,23 @@ class DiskCleanerGUI:
         if deleted_count > 0:
             self.invalidate_cache()
 
-        # Show results
+        # Show results and log
         if deleted_count > 0:
+            self.log("SUCCESS", f"Deleted {deleted_count} duplicate files from {len(deleted_items)} groups")
             message = f"Successfully deleted {deleted_count} duplicate files from {len(deleted_items)} groups"
             if errors:
                 message += f"\n\nErrors ({len(errors)}):\n" + "\n".join(errors[:5])
                 if len(errors) > 5:
                     message += f"\n... and {len(errors) - 5} more errors"
+                for err in errors:
+                    self.log("ERROR", f"Delete failed: {err}")
             messagebox.showinfo("Delete Complete", message)
 
             # Refresh duplicates if needed
             if not errors:
                 self.refresh_duplicates()
         else:
+            self.log("ERROR", "Delete failed - no duplicate files deleted")
             messagebox.showerror("Delete Failed", "No files were deleted.\n\n" + "\n".join(errors[:10]))
 
 def main():

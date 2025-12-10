@@ -15,6 +15,40 @@ from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import stat
 
+# File type categories for filtering
+FILE_CATEGORIES = {
+    'All Files': None,  # No filter
+    'Videos': {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpeg', '.mpg', '.3gp'},
+    'Images': {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.svg', '.ico', '.raw', '.heic', '.heif'},
+    'Audio': {'.mp3', '.wav', '.flac', '.aac', '.ogg', '.wma', '.m4a', '.opus', '.aiff'},
+    'Documents': {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.rtf', '.odt', '.ods', '.odp', '.csv'},
+    'Archives': {'.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.iso', '.cab'},
+    'Executables': {'.exe', '.msi', '.dll', '.bat', '.cmd', '.ps1', '.sh', '.app', '.dmg'},
+    'Code': {'.py', '.js', '.ts', '.java', '.cpp', '.c', '.h', '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.html', '.css', '.json', '.xml', '.yaml', '.yml'},
+    'Databases': {'.db', '.sqlite', '.sqlite3', '.mdb', '.accdb', '.sql'},
+    'Disk Images': {'.iso', '.img', '.vhd', '.vhdx', '.vmdk', '.qcow2'},
+}
+
+def get_file_category(filepath: str) -> str:
+    """Get the category of a file based on its extension"""
+    ext = os.path.splitext(filepath)[1].lower()
+    for category, extensions in FILE_CATEGORIES.items():
+        if extensions and ext in extensions:
+            return category
+    return 'Other'
+
+
+def send_log(level: str, message: str):
+    """Send a log message to the Electron frontend"""
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(json.dumps({
+        'type': 'log',
+        'level': level,
+        'message': message,
+        'timestamp': timestamp
+    }), flush=True)
+
 
 class DiskAnalyzer:
     def __init__(self, min_size_mb: int = 1):
@@ -91,6 +125,9 @@ class DiskAnalyzer:
             'message': message,
             'filesScanned': self.scanned_files
         }), flush=True)
+        # Also send as log
+        log_level = 'DEBUG' if progress_type == 'progress' else 'INFO'
+        send_log(log_level, message)
 
     def scan_directory(self, directory: str):
         """Scan directory for files"""
@@ -211,10 +248,40 @@ class DiskAnalyzer:
         scan_time = time.time() - start_time
 
         self.large_files.sort(reverse=True)
-        largest_files = [
-            {'size': self.format_size(size), 'path': path}
-            for size, path in self.large_files[:100]
-        ]
+
+        # Calculate category breakdown
+        category_sizes = defaultdict(int)
+        category_counts = defaultdict(int)
+
+        largest_files = []
+        for size, path in self.large_files[:100]:
+            category = get_file_category(path)
+            largest_files.append({
+                'size': self.format_size(size),
+                'sizeBytes': size,
+                'path': path,
+                'category': category
+            })
+
+        # Calculate totals for all large files (not just top 100)
+        for size, path in self.large_files:
+            category = get_file_category(path)
+            category_sizes[category] += size
+            category_counts[category] += 1
+
+        # Build category summary
+        category_summary = []
+        for category in list(FILE_CATEGORIES.keys())[1:] + ['Other']:  # Skip 'All Files'
+            if category in category_sizes:
+                category_summary.append({
+                    'category': category,
+                    'size': self.format_size(category_sizes[category]),
+                    'sizeBytes': category_sizes[category],
+                    'count': category_counts[category]
+                })
+
+        # Sort by size descending
+        category_summary.sort(key=lambda x: x['sizeBytes'], reverse=True)
 
         duplicate_list = []
         for file_hash, filepaths in duplicates.items():
@@ -236,7 +303,9 @@ class DiskAnalyzer:
         return {
             'message': f"Scan complete! {self.scanned_files:,} files ({self.format_size(self.total_size)}) in {scan_time:.1f}s",
             'largestFiles': largest_files,
-            'duplicates': duplicate_list
+            'duplicates': duplicate_list,
+            'categorySummary': category_summary,
+            'categories': list(FILE_CATEGORIES.keys()) + ['Other']
         }
 
 
@@ -254,8 +323,10 @@ def main():
             cmd_type = command.get('command')
 
             if cmd_type == 'get_drives':
+                send_log('INFO', 'Getting available drives')
                 temp_analyzer = DiskAnalyzer()
                 drives = temp_analyzer.get_available_drives()
+                send_log('INFO', f'Found drives: {", ".join(drives)}')
                 print(json.dumps({'type': 'result', 'data': drives}), flush=True)
 
             elif cmd_type == 'start_scan':
@@ -269,10 +340,44 @@ def main():
                 else:
                     drives_to_scan = [drives_selection]
 
+                send_log('INFO', f'Starting scan: {", ".join(drives_to_scan)} (min size: {min_size_mb}MB)')
                 results = analyzer.scan(drives_to_scan)
+
+                # Log completion
+                if 'cancelled' not in results:
+                    send_log('SUCCESS', results.get('message', 'Scan complete'))
+                    send_log('INFO', f'Found {len(results.get("largestFiles", []))} large files, {len(results.get("duplicates", []))} duplicate groups')
+
                 print(json.dumps({'type': 'result', 'data': results}), flush=True)
 
+            elif cmd_type == 'get_categories':
+                # Return list of available file categories
+                categories = list(FILE_CATEGORIES.keys()) + ['Other']
+                print(json.dumps({'type': 'result', 'data': categories}), flush=True)
+
+            elif cmd_type == 'filter_by_category':
+                # Filter large files by category (client-side filtering helper)
+                category = command.get('category', 'All Files')
+                send_log('INFO', f'Filtering by category: {category}')
+                if analyzer and analyzer.large_files:
+                    filtered_files = []
+                    for size, path in analyzer.large_files[:100]:
+                        file_category = get_file_category(path)
+                        if category == 'All Files' or file_category == category:
+                            filtered_files.append({
+                                'size': analyzer.format_size(size),
+                                'sizeBytes': size,
+                                'path': path,
+                                'category': file_category
+                            })
+                    send_log('INFO', f'Filter returned {len(filtered_files)} files')
+                    print(json.dumps({'type': 'result', 'data': filtered_files}), flush=True)
+                else:
+                    send_log('WARNING', 'No scan data available for filtering')
+                    print(json.dumps({'type': 'error', 'message': 'No scan data available'}), flush=True)
+
             elif cmd_type == 'refresh_duplicates':
+                send_log('INFO', 'Refreshing duplicates')
                 if analyzer and analyzer.file_hashes:
                     duplicates = analyzer.verify_duplicates_with_full_hash()
 
@@ -298,13 +403,48 @@ def main():
                         'largestFiles': [],
                         'duplicates': duplicate_list
                     }
+                    send_log('SUCCESS', f'Refresh complete - {len(duplicate_list)} duplicate groups')
                     print(json.dumps({'type': 'result', 'data': results}), flush=True)
                 else:
+                    send_log('WARNING', 'No scan data available for refresh')
                     print(json.dumps({'type': 'error', 'message': 'No scan data available'}), flush=True)
 
+            elif cmd_type == 'delete_files':
+                # Handle file deletion
+                files_to_delete = command.get('files', [])
+                send_log('INFO', f'Delete request for {len(files_to_delete)} files')
+                deleted_count = 0
+                errors = []
+
+                for filepath in files_to_delete:
+                    try:
+                        os.remove(filepath)
+                        deleted_count += 1
+                        send_log('DEBUG', f'Deleted: {filepath}')
+                    except Exception as e:
+                        errors.append(f"{filepath}: {str(e)}")
+                        send_log('ERROR', f'Failed to delete {filepath}: {str(e)}')
+
+                if deleted_count > 0:
+                    send_log('SUCCESS', f'Deleted {deleted_count} files')
+
+                print(json.dumps({
+                    'type': 'result',
+                    'data': {
+                        'deletedCount': deleted_count,
+                        'errors': errors
+                    }
+                }), flush=True)
+
+            elif cmd_type == 'get_logs':
+                # Just acknowledge - logs are sent in real-time
+                print(json.dumps({'type': 'result', 'data': 'Logs are sent in real-time'}), flush=True)
+
         except json.JSONDecodeError:
+            send_log('ERROR', 'Invalid JSON received')
             print(json.dumps({'type': 'error', 'message': 'Invalid JSON'}), flush=True)
         except Exception as e:
+            send_log('ERROR', f'Unexpected error: {str(e)}')
             print(json.dumps({'type': 'error', 'message': str(e)}), flush=True)
 
 
