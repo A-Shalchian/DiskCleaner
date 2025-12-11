@@ -10,9 +10,11 @@ import json
 import hashlib
 import psutil
 import time
+import csv
 from collections import defaultdict
 from typing import Dict, List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 import stat
 
 # Try to import send2trash for Recycle Bin support
@@ -481,6 +483,200 @@ def main():
             elif cmd_type == 'get_logs':
                 # Just acknowledge - logs are sent in real-time
                 print(json.dumps({'type': 'result', 'data': 'Logs are sent in real-time'}), flush=True)
+
+            elif cmd_type == 'export_large_files':
+                # Export large files to file
+                format_type = command.get('format', 'csv')
+                filepath = command.get('filepath', '')
+
+                if not filepath:
+                    print(json.dumps({'type': 'error', 'message': 'No filepath provided'}), flush=True)
+                    continue
+
+                if not analyzer or not analyzer.large_files:
+                    send_log('WARNING', 'No scan data available for export')
+                    print(json.dumps({'type': 'error', 'message': 'No scan data available. Run a scan first.'}), flush=True)
+                    continue
+
+                try:
+                    send_log('INFO', f'Exporting large files to {format_type.upper()}: {filepath}')
+
+                    # Prepare export data
+                    export_data = []
+                    for rank, (size_bytes, path) in enumerate(analyzer.large_files[:100], 1):
+                        category = get_file_category(path)
+                        export_data.append({
+                            'rank': rank,
+                            'size': analyzer.format_size(size_bytes),
+                            'size_bytes': size_bytes,
+                            'path': path,
+                            'category': category,
+                            'filename': os.path.basename(path)
+                        })
+
+                    if format_type == 'csv':
+                        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                            writer = csv.DictWriter(f, fieldnames=['rank', 'size', 'size_bytes', 'path', 'category', 'filename'])
+                            writer.writeheader()
+                            writer.writerows(export_data)
+
+                    elif format_type == 'json':
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            json.dump({
+                                'export_type': 'large_files',
+                                'export_date': datetime.now().isoformat(),
+                                'total_files': len(export_data),
+                                'files': export_data
+                            }, f, indent=2, ensure_ascii=False)
+
+                    else:  # txt
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            f.write("=" * 80 + "\n")
+                            f.write("LARGE FILES REPORT\n")
+                            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                            f.write(f"Total Files: {len(export_data)}\n")
+                            f.write("=" * 80 + "\n\n")
+
+                            for item in export_data:
+                                f.write(f"{item['rank']:4d}. [{item['category']:12s}] {item['size']:>12s}  {item['path']}\n")
+
+                            f.write("\n" + "=" * 80 + "\n")
+                            f.write("END OF REPORT\n")
+                            f.write("=" * 80 + "\n")
+
+                    send_log('SUCCESS', f'Exported {len(export_data)} large files to {filepath}')
+                    print(json.dumps({
+                        'type': 'result',
+                        'data': {
+                            'success': True,
+                            'exportedCount': len(export_data),
+                            'filepath': filepath
+                        }
+                    }), flush=True)
+
+                except Exception as e:
+                    send_log('ERROR', f'Export failed: {str(e)}')
+                    print(json.dumps({'type': 'error', 'message': f'Export failed: {str(e)}'}), flush=True)
+
+            elif cmd_type == 'export_duplicates':
+                # Export duplicates to file
+                format_type = command.get('format', 'csv')
+                filepath = command.get('filepath', '')
+
+                if not filepath:
+                    print(json.dumps({'type': 'error', 'message': 'No filepath provided'}), flush=True)
+                    continue
+
+                if not analyzer or not analyzer.file_hashes:
+                    send_log('WARNING', 'No scan data available for export')
+                    print(json.dumps({'type': 'error', 'message': 'No scan data available. Run a scan first.'}), flush=True)
+                    continue
+
+                try:
+                    send_log('INFO', f'Exporting duplicates to {format_type.upper()}: {filepath}')
+
+                    # Get verified duplicates
+                    duplicates = {k: v for k, v in analyzer.file_hashes.items() if len(v) > 1}
+
+                    # Prepare export data
+                    export_data = []
+                    total_waste = 0
+                    group_num = 0
+
+                    for file_hash, filepaths in duplicates.items():
+                        if len(filepaths) <= 1:
+                            continue
+
+                        group_num += 1
+                        try:
+                            size_bytes = os.path.getsize(filepaths[0])
+                            waste = (len(filepaths) - 1) * size_bytes
+                            total_waste += waste
+                        except OSError:
+                            size_bytes = 0
+                            waste = 0
+
+                        for path in filepaths:
+                            export_data.append({
+                                'group': group_num,
+                                'size': analyzer.format_size(size_bytes),
+                                'size_bytes': size_bytes,
+                                'waste': analyzer.format_size(waste),
+                                'waste_bytes': waste,
+                                'copies': len(filepaths),
+                                'path': path,
+                                'filename': os.path.basename(path)
+                            })
+
+                    if format_type == 'csv':
+                        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                            writer = csv.DictWriter(f, fieldnames=['group', 'size', 'size_bytes', 'copies', 'waste', 'path', 'filename'])
+                            writer.writeheader()
+                            writer.writerows(export_data)
+
+                    elif format_type == 'json':
+                        # Group data for JSON
+                        grouped_data = {}
+                        for item in export_data:
+                            group = item['group']
+                            if group not in grouped_data:
+                                grouped_data[group] = {
+                                    'group': group,
+                                    'size': item['size'],
+                                    'size_bytes': item['size_bytes'],
+                                    'copies': item['copies'],
+                                    'waste': item['waste'],
+                                    'waste_bytes': item['waste_bytes'],
+                                    'files': []
+                                }
+                            grouped_data[group]['files'].append(item['path'])
+
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            json.dump({
+                                'export_type': 'duplicates',
+                                'export_date': datetime.now().isoformat(),
+                                'total_groups': len(grouped_data),
+                                'total_waste': analyzer.format_size(total_waste),
+                                'total_waste_bytes': total_waste,
+                                'groups': list(grouped_data.values())
+                            }, f, indent=2, ensure_ascii=False)
+
+                    else:  # txt
+                        with open(filepath, 'w', encoding='utf-8') as f:
+                            f.write("=" * 80 + "\n")
+                            f.write("DUPLICATE FILES REPORT\n")
+                            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                            f.write(f"Total Duplicate Groups: {group_num}\n")
+                            f.write(f"Potential Space Savings: {analyzer.format_size(total_waste)}\n")
+                            f.write("=" * 80 + "\n\n")
+
+                            current_group = None
+                            for item in export_data:
+                                if item['group'] != current_group:
+                                    if current_group is not None:
+                                        f.write("\n")
+                                    current_group = item['group']
+                                    f.write(f"Group #{item['group']} - {item['copies']} copies of {item['size']} file (waste: {item['waste']})\n")
+                                    f.write("-" * 60 + "\n")
+                                f.write(f"  - {item['path']}\n")
+
+                            f.write("\n" + "=" * 80 + "\n")
+                            f.write("END OF REPORT\n")
+                            f.write("=" * 80 + "\n")
+
+                    send_log('SUCCESS', f'Exported {group_num} duplicate groups to {filepath}')
+                    print(json.dumps({
+                        'type': 'result',
+                        'data': {
+                            'success': True,
+                            'exportedGroups': group_num,
+                            'filepath': filepath
+                        }
+                    }), flush=True)
+
+                except Exception as e:
+                    send_log('ERROR', f'Export failed: {str(e)}')
+                    print(json.dumps({'type': 'error', 'message': f'Export failed: {str(e)}'}), flush=True)
 
         except json.JSONDecodeError:
             send_log('ERROR', 'Invalid JSON received')

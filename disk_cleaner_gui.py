@@ -20,7 +20,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import stat
 import pickle
 import json
+import csv
 from pathlib import Path
+from datetime import datetime
 
 # Try to import send2trash for Recycle Bin support
 try:
@@ -452,6 +454,13 @@ class DiskCleanerGUI:
         ttk.Button(large_files_btn_frame, text="Delete Selected", command=self.delete_selected_large_files,
                    style='Danger.TButton').pack(side=tk.LEFT, padx=(10, 0))
 
+        # Export buttons
+        ttk.Separator(large_files_btn_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=(15, 10), fill=tk.Y)
+        ttk.Label(large_files_btn_frame, text="Export:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(large_files_btn_frame, text="CSV", command=lambda: self.export_large_files('csv'), width=5).pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(large_files_btn_frame, text="JSON", command=lambda: self.export_large_files('json'), width=5).pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(large_files_btn_frame, text="TXT", command=lambda: self.export_large_files('txt'), width=5).pack(side=tk.LEFT)
+
         columns = ('Select', 'Size', 'Path')
         self.large_files_tree = ttk.Treeview(self.large_files_frame, columns=columns, show='headings', height=20)
         self.large_files_tree.heading('Select', text='☐')
@@ -499,6 +508,13 @@ class DiskCleanerGUI:
         ttk.Button(action_buttons_frame, text="Delete Selected",
                    command=self.delete_selected_duplicates_new,
                    style='Danger.TButton', width=15).pack(side=tk.LEFT, padx=(5, 0))
+
+        # Export buttons for duplicates
+        ttk.Separator(action_buttons_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=(15, 10), fill=tk.Y)
+        ttk.Label(action_buttons_frame, text="Export:").pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(action_buttons_frame, text="CSV", command=lambda: self.export_duplicates('csv'), width=5).pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(action_buttons_frame, text="JSON", command=lambda: self.export_duplicates('json'), width=5).pack(side=tk.LEFT, padx=(0, 3))
+        ttk.Button(action_buttons_frame, text="TXT", command=lambda: self.export_duplicates('txt'), width=5).pack(side=tk.LEFT)
 
         # Duplicates tree with improved layout
         tree_frame = ttk.Frame(self.duplicates_frame)
@@ -1431,6 +1447,233 @@ class DiskCleanerGUI:
         else:
             self.log("ERROR", "Delete failed - no duplicate files deleted")
             messagebox.showerror("Delete Failed", "No files were deleted.\n\n" + "\n".join(errors[:10]))
+
+    # ===== EXPORT METHODS =====
+
+    def export_large_files(self, format_type: str):
+        """Export large files list to CSV, JSON, or TXT"""
+        if not self.all_large_files:
+            messagebox.showwarning("No Data", "No large files to export. Please run a scan first.")
+            return
+
+        # Generate default filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_filename = f"large_files_{timestamp}"
+
+        # Get file extension and filetypes based on format
+        if format_type == 'csv':
+            ext = '.csv'
+            filetypes = [("CSV files", "*.csv"), ("All files", "*.*")]
+        elif format_type == 'json':
+            ext = '.json'
+            filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
+        else:  # txt
+            ext = '.txt'
+            filetypes = [("Text files", "*.txt"), ("All files", "*.*")]
+
+        # Ask for save location
+        filename = filedialog.asksaveasfilename(
+            defaultextension=ext,
+            filetypes=filetypes,
+            initialfile=default_filename + ext,
+            title=f"Export Large Files as {format_type.upper()}"
+        )
+
+        if not filename:
+            return
+
+        try:
+            # Prepare data
+            export_data = []
+            for rank, (size, filepath) in enumerate(self.all_large_files, 1):
+                try:
+                    size_bytes = os.path.getsize(filepath)
+                except OSError:
+                    size_bytes = 0
+                category = get_file_category(filepath)
+                export_data.append({
+                    'rank': rank,
+                    'size': size,
+                    'size_bytes': size_bytes,
+                    'path': filepath,
+                    'category': category,
+                    'filename': os.path.basename(filepath)
+                })
+
+            # Write file based on format
+            if format_type == 'csv':
+                self._export_csv(filename, export_data, ['rank', 'size', 'size_bytes', 'path', 'category', 'filename'])
+            elif format_type == 'json':
+                self._export_json(filename, {
+                    'export_type': 'large_files',
+                    'export_date': datetime.now().isoformat(),
+                    'total_files': len(export_data),
+                    'files': export_data
+                })
+            else:  # txt
+                self._export_large_files_txt(filename, export_data)
+
+            self.log("SUCCESS", f"Exported {len(export_data)} large files to {filename}")
+            messagebox.showinfo("Export Complete", f"Successfully exported {len(export_data)} files to:\n{filename}")
+
+        except Exception as e:
+            self.log("ERROR", f"Export failed: {e}")
+            messagebox.showerror("Export Error", f"Failed to export: {e}")
+
+    def export_duplicates(self, format_type: str):
+        """Export duplicates list to CSV, JSON, or TXT"""
+        if not self.duplicate_data:
+            messagebox.showwarning("No Data", "No duplicates to export. Please run a scan first.")
+            return
+
+        # Generate default filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_filename = f"duplicates_{timestamp}"
+
+        # Get file extension and filetypes based on format
+        if format_type == 'csv':
+            ext = '.csv'
+            filetypes = [("CSV files", "*.csv"), ("All files", "*.*")]
+        elif format_type == 'json':
+            ext = '.json'
+            filetypes = [("JSON files", "*.json"), ("All files", "*.*")]
+        else:  # txt
+            ext = '.txt'
+            filetypes = [("Text files", "*.txt"), ("All files", "*.*")]
+
+        # Ask for save location
+        filename = filedialog.asksaveasfilename(
+            defaultextension=ext,
+            filetypes=filetypes,
+            initialfile=default_filename + ext,
+            title=f"Export Duplicates as {format_type.upper()}"
+        )
+
+        if not filename:
+            return
+
+        try:
+            # Prepare data
+            export_data = []
+            total_waste = 0
+
+            for group_num, (item_id, filepaths) in enumerate(self.duplicate_data.items(), 1):
+                if len(filepaths) <= 1:
+                    continue
+
+                try:
+                    size_bytes = os.path.getsize(filepaths[0])
+                    size = self.analyzer.format_size(size_bytes)
+                    waste = (len(filepaths) - 1) * size_bytes
+                    total_waste += waste
+                except OSError:
+                    size_bytes = 0
+                    size = "Unknown"
+                    waste = 0
+
+                for filepath in filepaths:
+                    export_data.append({
+                        'group': group_num,
+                        'size': size,
+                        'size_bytes': size_bytes,
+                        'waste_bytes': waste,
+                        'waste': self.analyzer.format_size(waste),
+                        'copies': len(filepaths),
+                        'path': filepath,
+                        'filename': os.path.basename(filepath)
+                    })
+
+            # Write file based on format
+            if format_type == 'csv':
+                self._export_csv(filename, export_data, ['group', 'size', 'size_bytes', 'copies', 'waste', 'path', 'filename'])
+            elif format_type == 'json':
+                # For JSON, group by duplicate groups
+                grouped_data = {}
+                for item in export_data:
+                    group = item['group']
+                    if group not in grouped_data:
+                        grouped_data[group] = {
+                            'group': group,
+                            'size': item['size'],
+                            'size_bytes': item['size_bytes'],
+                            'copies': item['copies'],
+                            'waste': item['waste'],
+                            'waste_bytes': item['waste_bytes'],
+                            'files': []
+                        }
+                    grouped_data[group]['files'].append(item['path'])
+
+                self._export_json(filename, {
+                    'export_type': 'duplicates',
+                    'export_date': datetime.now().isoformat(),
+                    'total_groups': len(grouped_data),
+                    'total_waste': self.analyzer.format_size(total_waste),
+                    'total_waste_bytes': total_waste,
+                    'groups': list(grouped_data.values())
+                })
+            else:  # txt
+                self._export_duplicates_txt(filename, export_data, total_waste)
+
+            num_groups = len(set(item['group'] for item in export_data))
+            self.log("SUCCESS", f"Exported {num_groups} duplicate groups to {filename}")
+            messagebox.showinfo("Export Complete", f"Successfully exported {num_groups} duplicate groups to:\n{filename}")
+
+        except Exception as e:
+            self.log("ERROR", f"Export failed: {e}")
+            messagebox.showerror("Export Error", f"Failed to export: {e}")
+
+    def _export_csv(self, filename: str, data: list, fieldnames: list):
+        """Write data to CSV file"""
+        with open(filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(data)
+
+    def _export_json(self, filename: str, data: dict):
+        """Write data to JSON file"""
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def _export_large_files_txt(self, filename: str, data: list):
+        """Write large files data to TXT file"""
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("=" * 80 + "\n")
+            f.write("LARGE FILES REPORT\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Total Files: {len(data)}\n")
+            f.write("=" * 80 + "\n\n")
+
+            for item in data:
+                f.write(f"{item['rank']:4d}. [{item['category']:12s}] {item['size']:>12s}  {item['path']}\n")
+
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("END OF REPORT\n")
+            f.write("=" * 80 + "\n")
+
+    def _export_duplicates_txt(self, filename: str, data: list, total_waste: int):
+        """Write duplicates data to TXT file"""
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("=" * 80 + "\n")
+            f.write("DUPLICATE FILES REPORT\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            num_groups = len(set(item['group'] for item in data))
+            f.write(f"Total Duplicate Groups: {num_groups}\n")
+            f.write(f"Potential Space Savings: {self.analyzer.format_size(total_waste)}\n")
+            f.write("=" * 80 + "\n\n")
+
+            current_group = None
+            for item in data:
+                if item['group'] != current_group:
+                    if current_group is not None:
+                        f.write("\n")
+                    current_group = item['group']
+                    f.write(f"Group #{item['group']} - {item['copies']} copies of {item['size']} file (waste: {item['waste']})\n")
+                    f.write("-" * 60 + "\n")
+                f.write(f"  - {item['path']}\n")
+
+            f.write("\n" + "=" * 80 + "\n")
+            f.write("END OF REPORT\n")
+            f.write("=" * 80 + "\n")
 
 def main():
     root = tk.Tk()
