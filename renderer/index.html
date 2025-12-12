@@ -72,6 +72,7 @@
                 <button class="tab-button active" data-tab="largeFiles">Largest Files</button>
                 <button class="tab-button" data-tab="duplicates">Duplicate Files</button>
                 <button class="tab-button" data-tab="commands">Delete Commands</button>
+                <button class="tab-button" data-tab="settings">⚙️ Settings</button>
             </div>
 
             <!-- Large Files Tab -->
@@ -137,6 +138,63 @@
                     <button id="saveCommands" class="btn btn-success">Save Commands</button>
                     <button id="copyCommands" class="btn btn-secondary">Copy to Clipboard</button>
                     <button id="clearCommands" class="btn btn-danger">Clear</button>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div class="tab-content" id="settingsTab">
+                <div class="settings-section">
+                    <h3 class="section-title">Folder Exclusions</h3>
+                    <p class="info-text">Uncheck folders to include them in scans. Warning: Scanning system folders may take much longer.</p>
+
+                    <div class="checkbox-grid">
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="skipWindows" checked>
+                            <span class="checkbox-label">Windows</span>
+                            <span class="checkbox-hint">(~20-40 GB)</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="skipProgramFiles" checked>
+                            <span class="checkbox-label">Program Files</span>
+                            <span class="checkbox-hint">(varies)</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="skipProgramFilesX86" checked>
+                            <span class="checkbox-label">Program Files (x86)</span>
+                            <span class="checkbox-hint">(varies)</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="skipTemp" checked>
+                            <span class="checkbox-label">Temp/Cache</span>
+                            <span class="checkbox-hint">(temp, tmp, cache)</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="skipRecycleBin" checked>
+                            <span class="checkbox-label">Recycle Bin</span>
+                            <span class="checkbox-hint">($Recycle.Bin)</span>
+                        </label>
+                        <label class="checkbox-item">
+                            <input type="checkbox" id="skipSystemVolume" checked>
+                            <span class="checkbox-label">System Volume Info</span>
+                            <span class="checkbox-hint">(System restore)</span>
+                        </label>
+                    </div>
+
+                    <div class="button-group" style="margin-top: 15px;">
+                        <button id="skipAllFolders" class="btn btn-secondary">Skip All (Default)</button>
+                        <button id="includeAllFolders" class="btn btn-secondary">Include All (Full Scan)</button>
+                    </div>
+
+                    <p id="folderStatus" class="status-text">Status: Default mode (skipping system folders)</p>
+                </div>
+
+                <div class="settings-section">
+                    <h3 class="section-title">Notes</h3>
+                    <ul class="notes-list">
+                        <li>Changing folder settings will clear the cache for the next scan.</li>
+                        <li>Including system folders may show protected files that cannot be deleted.</li>
+                        <li>A full scan of C: drive with all folders included can take 10+ minutes.</li>
+                    </ul>
                 </div>
             </div>
         </div>

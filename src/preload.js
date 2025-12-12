@@ -6,7 +6,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     getDrives: () => ipcRenderer.invoke('get-drives'),
 
-    startScan: (drives, minSizeMB) => ipcRenderer.invoke('start-scan', { drives, minSizeMB }),
+    startScan: (drives, minSizeMB, skipFolders) => ipcRenderer.invoke('start-scan', { drives, minSizeMB, skipFolders }),
     stopScan: () => ipcRenderer.invoke('stop-scan'),
     refreshDuplicates: () => ipcRenderer.invoke('refresh-duplicates'),
 

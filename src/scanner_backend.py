@@ -77,7 +77,12 @@ def delete_file(filepath: str, use_recycle_bin: bool = True) -> Tuple[bool, str]
 
 
 class DiskAnalyzer:
-    def __init__(self, min_size_mb: int = 1):
+    DEFAULT_SKIP_FOLDERS = {
+        'system volume information', '$recycle.bin', 'windows',
+        'program files', 'program files (x86)', 'temp', 'tmp', 'cache'
+    }
+
+    def __init__(self, min_size_mb: int = 1, skip_folders: set = None):
         self.min_size_bytes = min_size_mb * 1024 * 1024
         self.file_hashes: Dict[str, List[str]] = defaultdict(list)
         self.large_files: List[Tuple[int, str]] = []
@@ -85,6 +90,7 @@ class DiskAnalyzer:
         self.total_size = 0
         self.stop_scanning = False
         self.max_workers = min(4, os.cpu_count() or 1)
+        self.skip_folders = skip_folders if skip_folders is not None else self.DEFAULT_SKIP_FOLDERS.copy()
 
     def get_available_drives(self) -> List[str]:
         """Get list of available drives"""
@@ -162,11 +168,9 @@ class DiskAnalyzer:
                 if self.stop_scanning:
                     break
 
-                # Skip system directories
                 dirs[:] = [d for d in dirs if not d.startswith('.') and
-                          d.lower() not in ['system volume information', '$recycle.bin',
-                                          'windows', 'program files', 'program files (x86)',
-                                          'temp', 'tmp', 'cache', 'node_modules']]
+                          d.lower() not in self.skip_folders and
+                          d.lower() != 'node_modules']
 
                 for file in files:
                     if self.stop_scanning:
@@ -358,15 +362,18 @@ def main():
             elif cmd_type == 'start_scan':
                 min_size_mb = command.get('minSizeMB', 1)
                 drives_selection = command.get('drives', 'all')
+                skip_folders_list = command.get('skipFolders', [])
+                skip_folders = set(skip_folders_list) if skip_folders_list else None
 
-                analyzer = DiskAnalyzer(min_size_mb=min_size_mb)
+                analyzer = DiskAnalyzer(min_size_mb=min_size_mb, skip_folders=skip_folders)
 
                 if drives_selection == 'all':
                     drives_to_scan = analyzer.get_available_drives()
                 else:
                     drives_to_scan = [drives_selection]
 
-                send_log('INFO', f'Starting scan: {", ".join(drives_to_scan)} (min size: {min_size_mb}MB)')
+                skip_info = f", skipping: {len(skip_folders_list)} folders" if skip_folders_list else " (default exclusions)"
+                send_log('INFO', f'Starting scan: {", ".join(drives_to_scan)} (min size: {min_size_mb}MB{skip_info})')
                 results = analyzer.scan(drives_to_scan)
 
                 # Log completion

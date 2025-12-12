@@ -55,16 +55,22 @@ def get_file_category(filepath: str) -> str:
     return 'Other'
 
 class DiskAnalyzer:
-    def __init__(self, min_size_mb: int = 1):
+    DEFAULT_SKIP_FOLDERS = {
+        'system volume information', '$recycle.bin', 'windows',
+        'program files', 'program files (x86)', 'temp', 'tmp', 'cache'
+    }
+
+    def __init__(self, min_size_mb: int = 1, skip_folders: set = None):
         self.min_size_bytes = min_size_mb * 1024 * 1024
         self.file_hashes: Dict[str, List[str]] = defaultdict(list)
         self.large_files: List[Tuple[int, str]] = []
         self.scanned_files = 0
         self.total_size = 0
         self.stop_scanning = False
-        self.max_workers = min(4, os.cpu_count() or 1)  # Optimize thread count
+        self.max_workers = min(4, os.cpu_count() or 1)
         self.cache_dir = Path.home() / '.disk_cleaner_cache'
         self.cache_dir.mkdir(exist_ok=True)
+        self.skip_folders = skip_folders if skip_folders is not None else self.DEFAULT_SKIP_FOLDERS.copy()
         
     def get_available_drives(self) -> List[str]:
         """Get list of available drives on Windows"""
@@ -136,11 +142,8 @@ class DiskAnalyzer:
                 if self.stop_scanning:
                     break
                     
-                # Skip system directories that might cause issues
-                dirs[:] = [d for d in dirs if not d.startswith('.') and 
-                          d.lower() not in ['system volume information', '$recycle.bin', 
-                                          'windows', 'program files', 'program files (x86)',
-                                          'temp', 'tmp', 'cache']]
+                dirs[:] = [d for d in dirs if not d.startswith('.') and
+                          d.lower() not in self.skip_folders]
                 
                 # Process files in batches for better performance
                 for file in files:
@@ -323,6 +326,13 @@ class DiskCleanerGUI:
         self.all_large_files = []  # Store all large files for filtering
         self.current_filter = 'All Files'  # Current file type filter
         self.use_recycle_bin = tk.BooleanVar(value=RECYCLE_BIN_AVAILABLE)  # Use Recycle Bin by default if available
+
+        self.skip_windows = tk.BooleanVar(value=True)
+        self.skip_program_files = tk.BooleanVar(value=True)
+        self.skip_program_files_x86 = tk.BooleanVar(value=True)
+        self.skip_temp = tk.BooleanVar(value=True)
+        self.skip_recycle_bin = tk.BooleanVar(value=True)
+        self.skip_system_volume = tk.BooleanVar(value=True)
 
         self.setup_ui()
         self.check_progress_queue()
@@ -594,6 +604,151 @@ class DiskCleanerGUI:
         # Store all logs for filtering
         self.all_logs = []
 
+        # Settings tab
+        self.settings_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.settings_frame, text="⚙️ Settings")
+
+        self.setup_settings_tab()
+
+    def setup_settings_tab(self):
+        """Setup the settings tab with folder exclusion options"""
+        # Main container with padding
+        settings_container = ttk.Frame(self.settings_frame, padding="20")
+        settings_container.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.settings_frame.columnconfigure(0, weight=1)
+        self.settings_frame.rowconfigure(0, weight=1)
+
+        # Folder Exclusions Section
+        exclusions_frame = ttk.LabelFrame(settings_container, text="Folder Exclusions", padding="15")
+        exclusions_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
+        exclusions_frame.columnconfigure(1, weight=1)
+
+        # Description
+        desc_label = ttk.Label(exclusions_frame,
+                               text="Uncheck folders to include them in scans. Warning: Scanning system folders may take much longer and include protected files.",
+                               wraplength=600, foreground='gray')
+        desc_label.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 15))
+
+        # Folder exclusion checkboxes - arranged in a grid
+        folders_frame = ttk.Frame(exclusions_frame)
+        folders_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E))
+
+        # Row 1
+        ttk.Checkbutton(folders_frame, text="Windows", variable=self.skip_windows,
+                       command=self.on_folder_setting_changed).grid(row=0, column=0, sticky=tk.W, padx=(0, 30), pady=5)
+        ttk.Label(folders_frame, text="(~20-40 GB)", foreground='gray').grid(row=0, column=1, sticky=tk.W, padx=(0, 50))
+
+        ttk.Checkbutton(folders_frame, text="Program Files", variable=self.skip_program_files,
+                       command=self.on_folder_setting_changed).grid(row=0, column=2, sticky=tk.W, padx=(0, 30), pady=5)
+        ttk.Label(folders_frame, text="(varies)", foreground='gray').grid(row=0, column=3, sticky=tk.W)
+
+        # Row 2
+        ttk.Checkbutton(folders_frame, text="Program Files (x86)", variable=self.skip_program_files_x86,
+                       command=self.on_folder_setting_changed).grid(row=1, column=0, sticky=tk.W, padx=(0, 30), pady=5)
+        ttk.Label(folders_frame, text="(varies)", foreground='gray').grid(row=1, column=1, sticky=tk.W, padx=(0, 50))
+
+        ttk.Checkbutton(folders_frame, text="Temp/Cache", variable=self.skip_temp,
+                       command=self.on_folder_setting_changed).grid(row=1, column=2, sticky=tk.W, padx=(0, 30), pady=5)
+        ttk.Label(folders_frame, text="(temp, tmp, cache)", foreground='gray').grid(row=1, column=3, sticky=tk.W)
+
+        # Row 3
+        ttk.Checkbutton(folders_frame, text="Recycle Bin", variable=self.skip_recycle_bin,
+                       command=self.on_folder_setting_changed).grid(row=2, column=0, sticky=tk.W, padx=(0, 30), pady=5)
+        ttk.Label(folders_frame, text="($Recycle.Bin)", foreground='gray').grid(row=2, column=1, sticky=tk.W, padx=(0, 50))
+
+        ttk.Checkbutton(folders_frame, text="System Volume Info", variable=self.skip_system_volume,
+                       command=self.on_folder_setting_changed).grid(row=2, column=2, sticky=tk.W, padx=(0, 30), pady=5)
+        ttk.Label(folders_frame, text="(System restore)", foreground='gray').grid(row=2, column=3, sticky=tk.W)
+
+        # Quick toggle buttons
+        buttons_frame = ttk.Frame(exclusions_frame)
+        buttons_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(15, 0))
+
+        ttk.Button(buttons_frame, text="Skip All (Default)", command=self.skip_all_folders).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(buttons_frame, text="Include All (Full Scan)", command=self.include_all_folders).pack(side=tk.LEFT, padx=(0, 10))
+
+        # Current status label
+        self.folder_status_var = tk.StringVar(value="")
+        self.update_folder_status()
+        status_label = ttk.Label(exclusions_frame, textvariable=self.folder_status_var, foreground='blue')
+        status_label.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+
+        # Note about cache
+        note_frame = ttk.LabelFrame(settings_container, text="Notes", padding="15")
+        note_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 15))
+
+        note_text = ("• Changing folder settings will clear the cache for the next scan.\n"
+                     "• Including system folders may show protected files that cannot be deleted.\n"
+                     "• A full scan of C: drive with all folders included can take 10+ minutes.")
+        ttk.Label(note_frame, text=note_text, wraplength=600, justify=tk.LEFT).grid(row=0, column=0, sticky=tk.W)
+
+    def on_folder_setting_changed(self):
+        """Handle folder exclusion checkbox changes"""
+        self.update_folder_status()
+        # Clear cache when settings change
+        self.analyzer.clear_cache()
+        self.log("INFO", "Folder settings changed - cache cleared")
+
+    def update_folder_status(self):
+        """Update the folder status label"""
+        skipped = []
+        if self.skip_windows.get():
+            skipped.append("Windows")
+        if self.skip_program_files.get():
+            skipped.append("Program Files")
+        if self.skip_program_files_x86.get():
+            skipped.append("Program Files (x86)")
+        if self.skip_temp.get():
+            skipped.append("Temp/Cache")
+        if self.skip_recycle_bin.get():
+            skipped.append("Recycle Bin")
+        if self.skip_system_volume.get():
+            skipped.append("System Volume")
+
+        if len(skipped) == 6:
+            self.folder_status_var.set("Status: Default mode (skipping system folders)")
+        elif len(skipped) == 0:
+            self.folder_status_var.set("Status: Full scan mode (including all folders)")
+        else:
+            self.folder_status_var.set(f"Status: Skipping {len(skipped)} folder(s): {', '.join(skipped)}")
+
+    def skip_all_folders(self):
+        """Set all folder exclusions to True (default)"""
+        self.skip_windows.set(True)
+        self.skip_program_files.set(True)
+        self.skip_program_files_x86.set(True)
+        self.skip_temp.set(True)
+        self.skip_recycle_bin.set(True)
+        self.skip_system_volume.set(True)
+        self.on_folder_setting_changed()
+
+    def include_all_folders(self):
+        """Set all folder exclusions to False (full scan)"""
+        self.skip_windows.set(False)
+        self.skip_program_files.set(False)
+        self.skip_program_files_x86.set(False)
+        self.skip_temp.set(False)
+        self.skip_recycle_bin.set(False)
+        self.skip_system_volume.set(False)
+        self.on_folder_setting_changed()
+
+    def get_skip_folders(self) -> set:
+        """Get the set of folders to skip based on current settings"""
+        skip = set()
+        if self.skip_windows.get():
+            skip.add('windows')
+        if self.skip_program_files.get():
+            skip.add('program files')
+        if self.skip_program_files_x86.get():
+            skip.add('program files (x86)')
+        if self.skip_temp.get():
+            skip.update(['temp', 'tmp', 'cache'])
+        if self.skip_recycle_bin.get():
+            skip.add('$recycle.bin')
+        if self.skip_system_volume.get():
+            skip.add('system volume information')
+        return skip
+
     def update_drives_list(self):
         """Update the drives/directories combo box"""
         drives = self.analyzer.get_available_drives()
@@ -738,8 +893,8 @@ class DiskCleanerGUI:
             messagebox.showerror("Error", "Invalid minimum file size")
             return
 
-        # Reset analyzer
-        self.analyzer = DiskAnalyzer(min_size_mb=min_size)
+        skip_folders = self.get_skip_folders()
+        self.analyzer = DiskAnalyzer(min_size_mb=min_size, skip_folders=skip_folders)
 
         # Determine drives/directories to scan
         drives_selection = self.drives_var.get()

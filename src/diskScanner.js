@@ -121,12 +121,13 @@ class DiskScanner {
     }
 
     // Main scan function (delegated to Python)
-    async scan(drivesSelection, minSizeMB) {
-        console.log('[DiskScanner] Starting scan via Python:', { drivesSelection, minSizeMB });
+    async scan(drivesSelection, minSizeMB, skipFolders = []) {
+        console.log('[DiskScanner] Starting scan via Python:', { drivesSelection, minSizeMB, skipFolders });
         return this.sendCommand({
             command: 'start_scan',
             drives: drivesSelection,
-            minSizeMB: minSizeMB
+            minSizeMB: minSizeMB,
+            skipFolders: skipFolders
         });
     }
 

@@ -4,13 +4,24 @@ let currentTab = 'largeFiles';
 let duplicateData = {};
 let currentTheme = 'light';
 
+let folderSettings = {
+    skipWindows: true,
+    skipProgramFiles: true,
+    skipProgramFilesX86: true,
+    skipTemp: true,
+    skipRecycleBin: true,
+    skipSystemVolume: true
+};
+
 // Initialize on load
 document.addEventListener('DOMContentLoaded', async () => {
     initializeTheme();
+    loadFolderSettings();
     await initializeApp();
     setupEventListeners();
     setupTabs();
     setupProgressListener();
+    setupSettingsListeners();
 });
 
 // Theme Management
@@ -137,6 +148,9 @@ function switchTab(tabName) {
         case 'commands':
             contentId = 'commandsTab';
             break;
+        case 'settings':
+            contentId = 'settingsTab';
+            break;
     }
     document.getElementById(contentId).classList.add('active');
     currentTab = tabName;
@@ -166,7 +180,8 @@ async function startScan() {
     updateScanningState(true);
 
     try {
-        const results = await window.electronAPI.startScan(drives, minSize);
+        const skipFolders = getSkipFolders();
+        const results = await window.electronAPI.startScan(drives, minSize, skipFolders);
 
         if (!results.cancelled) {
             isScanning = false;
@@ -445,4 +460,121 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML.replace(/'/g, "\\'");
+}
+
+function loadFolderSettings() {
+    const saved = localStorage.getItem('diskCleanerFolderSettings');
+    if (saved) {
+        try {
+            folderSettings = JSON.parse(saved);
+        } catch (e) {
+            console.error('Error loading folder settings:', e);
+        }
+    }
+    applyFolderSettingsToUI();
+    updateFolderStatus();
+}
+
+function saveFolderSettings() {
+    localStorage.setItem('diskCleanerFolderSettings', JSON.stringify(folderSettings));
+}
+
+function applyFolderSettingsToUI() {
+    document.getElementById('skipWindows').checked = folderSettings.skipWindows;
+    document.getElementById('skipProgramFiles').checked = folderSettings.skipProgramFiles;
+    document.getElementById('skipProgramFilesX86').checked = folderSettings.skipProgramFilesX86;
+    document.getElementById('skipTemp').checked = folderSettings.skipTemp;
+    document.getElementById('skipRecycleBin').checked = folderSettings.skipRecycleBin;
+    document.getElementById('skipSystemVolume').checked = folderSettings.skipSystemVolume;
+}
+
+function setupSettingsListeners() {
+    document.getElementById('skipWindows').addEventListener('change', (e) => {
+        folderSettings.skipWindows = e.target.checked;
+        onFolderSettingChanged();
+    });
+    document.getElementById('skipProgramFiles').addEventListener('change', (e) => {
+        folderSettings.skipProgramFiles = e.target.checked;
+        onFolderSettingChanged();
+    });
+    document.getElementById('skipProgramFilesX86').addEventListener('change', (e) => {
+        folderSettings.skipProgramFilesX86 = e.target.checked;
+        onFolderSettingChanged();
+    });
+    document.getElementById('skipTemp').addEventListener('change', (e) => {
+        folderSettings.skipTemp = e.target.checked;
+        onFolderSettingChanged();
+    });
+    document.getElementById('skipRecycleBin').addEventListener('change', (e) => {
+        folderSettings.skipRecycleBin = e.target.checked;
+        onFolderSettingChanged();
+    });
+    document.getElementById('skipSystemVolume').addEventListener('change', (e) => {
+        folderSettings.skipSystemVolume = e.target.checked;
+        onFolderSettingChanged();
+    });
+
+    document.getElementById('skipAllFolders').addEventListener('click', skipAllFolders);
+    document.getElementById('includeAllFolders').addEventListener('click', includeAllFolders);
+}
+
+function onFolderSettingChanged() {
+    saveFolderSettings();
+    updateFolderStatus();
+}
+
+function updateFolderStatus() {
+    const skipped = [];
+    if (folderSettings.skipWindows) skipped.push('Windows');
+    if (folderSettings.skipProgramFiles) skipped.push('Program Files');
+    if (folderSettings.skipProgramFilesX86) skipped.push('Program Files (x86)');
+    if (folderSettings.skipTemp) skipped.push('Temp/Cache');
+    if (folderSettings.skipRecycleBin) skipped.push('Recycle Bin');
+    if (folderSettings.skipSystemVolume) skipped.push('System Volume');
+
+    const statusEl = document.getElementById('folderStatus');
+    if (skipped.length === 6) {
+        statusEl.textContent = 'Status: Default mode (skipping system folders)';
+    } else if (skipped.length === 0) {
+        statusEl.textContent = 'Status: Full scan mode (including all folders)';
+    } else {
+        statusEl.textContent = `Status: Skipping ${skipped.length} folder(s): ${skipped.join(', ')}`;
+    }
+}
+
+function skipAllFolders() {
+    folderSettings = {
+        skipWindows: true,
+        skipProgramFiles: true,
+        skipProgramFilesX86: true,
+        skipTemp: true,
+        skipRecycleBin: true,
+        skipSystemVolume: true
+    };
+    applyFolderSettingsToUI();
+    onFolderSettingChanged();
+}
+
+function includeAllFolders() {
+    folderSettings = {
+        skipWindows: false,
+        skipProgramFiles: false,
+        skipProgramFilesX86: false,
+        skipTemp: false,
+        skipRecycleBin: false,
+        skipSystemVolume: false
+    };
+    applyFolderSettingsToUI();
+    onFolderSettingChanged();
+}
+
+function getSkipFolders() {
+    const skip = [];
+    if (folderSettings.skipWindows) skip.push('windows');
+    if (folderSettings.skipProgramFiles) skip.push('program files');
+    if (folderSettings.skipProgramFilesX86) skip.push('program files (x86)');
+    if (folderSettings.skipTemp) skip.push('temp', 'tmp', 'cache');
+    if (folderSettings.skipRecycleBin) skip.push('$recycle.bin');
+    if (folderSettings.skipSystemVolume) skip.push('system volume information');
+    return skip;
 }

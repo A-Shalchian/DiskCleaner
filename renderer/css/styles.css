@@ -602,6 +602,95 @@ body {
     background: var(--text-muted);
 }
 
+/* Settings Tab */
+.settings-section {
+    background: var(--bg-app);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+    border: 1px solid var(--border);
+}
+
+.section-title {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.75rem;
+    color: var(--text-primary);
+}
+
+.checkbox-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin: 1rem 0;
+}
+
+.checkbox-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    padding: 0.5rem 0.75rem;
+    background: var(--bg-card);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    transition: var(--transition);
+}
+
+.checkbox-item:hover {
+    border-color: var(--primary);
+    background: var(--bg-hover);
+}
+
+.checkbox-item input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--primary);
+    cursor: pointer;
+}
+
+.checkbox-label {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.checkbox-hint {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-left: auto;
+}
+
+.status-text {
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+    background: rgba(99, 102, 241, 0.1);
+    border-radius: var(--radius);
+    font-size: 0.875rem;
+    color: var(--primary);
+    border-left: 3px solid var(--primary);
+}
+
+.notes-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.notes-list li {
+    padding: 0.5rem 0;
+    padding-left: 1.5rem;
+    position: relative;
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+}
+
+.notes-list li::before {
+    content: '•';
+    position: absolute;
+    left: 0.5rem;
+    color: var(--primary);
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .app-container {
@@ -613,6 +702,10 @@ body {
     }
 
     .settings-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .checkbox-grid {
         grid-template-columns: 1fr;
     }
 

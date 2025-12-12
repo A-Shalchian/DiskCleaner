@@ -83,16 +83,16 @@ ipcMain.handle('get-drives', async () => {
 });
 
 // Start scan
-ipcMain.handle('start-scan', async (event, { drives, minSizeMB }) => {
+ipcMain.handle('start-scan', async (event, { drives, minSizeMB, skipFolders }) => {
     try {
-        console.log('[main] Starting scan:', { drives, minSizeMB });
+        console.log('[main] Starting scan:', { drives, minSizeMB, skipFolders });
 
         // Set up progress callback
         scanner.onProgress = (data) => {
             mainWindow.webContents.send('scan-progress', data);
         };
 
-        const results = await scanner.scan(drives, minSizeMB);
+        const results = await scanner.scan(drives, minSizeMB, skipFolders || []);
         return results;
     } catch (error) {
         console.error('[main] Scan error:', error);
